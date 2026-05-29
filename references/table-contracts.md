@@ -52,3 +52,21 @@ This reference defines what each canonical table row means and what fields must 
 - One row = one aligned time bin.
 - Required fields: `time_bin_s`, `drop_count_total`, `rt_p95`, `data_age_p95`, `planning_total_p95`, `planning_wait_p95`, `reuse_p95`.
 - Use this table whenever reasoning about drop-latency correlation.
+
+## steady_state_summary
+
+- One row = one analysis scope, currently `raw` or `steady`.
+- Required fields: `scope`, `steady_start_s`, `sample_count`, `complete_count`, `drop_count_total`, RT/Data Age summary statistics, planning/wait/reuse summary statistics.
+- Use this table for report-level raw versus steady-state claims instead of mixing startup samples into steady conclusions.
+
+## deadline_metrics
+
+- One row = one deadline definition in one scope.
+- Required fields: `scope`, `metric_name`, `object`, `start_anchor`, `end_anchor`, `threshold_ms`, `eligible_count`, `miss_count`, `miss_rate_pct`.
+- Missing-path samples must not enter strict E2E deadline denominators.
+
+## anomaly_frame_table
+
+- One row = one top RT/Data Age anomaly frame.
+- Required fields: `fusion_trace_id`, `is_steady`, `reaction_time_ms`, `data_age_ms`, `anomaly_type`, `root_cause_tag`, and evidence fields for planning, handoff, and reuse.
+- The table is a compact triage surface; it should not replace frame-mode drill-down for final root cause.

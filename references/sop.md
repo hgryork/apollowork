@@ -531,9 +531,12 @@ Sensor 到 fusion：
 - `drop_event_table.csv`
 - `latency_timeline_table.csv`
 - `latency_drop_alignment_table.csv`
+- `steady_state_summary.csv`
+- `deadline_metrics.csv`
+- `anomaly_frame_table.csv`
 - `summary.md`
 
-其中 `drop_event_table` 和 `latency_drop_alignment_table` 是此次 SOP 新增的必选项，后续所有“丢帧为什么发生、是不是和慢帧同一时段”的问题都应从这两张表开始。
+其中 `drop_event_table`、`latency_drop_alignment_table`、`steady_state_summary.csv`、`deadline_metrics.csv` 和 `anomaly_frame_table.csv` 是报告可信度的最小增强集合。后续所有“丢帧为什么发生、是不是和慢帧同一时段、启动期是否污染稳态、deadline miss 口径是什么、Top 异常帧先看谁”的问题都应先从这些表开始。
 
 如果团队希望把报告进一步模板化，还可以额外固定三类“必须有解释文字”的图：一张全局 E2E 图、一张 planning 关键图、一张 drop-latency 对齐图。图的数量不必多，但每张图下都必须写清“这张图要证明什么”，避免报告变成只堆图不解释。
 

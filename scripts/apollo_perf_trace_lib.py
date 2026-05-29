@@ -33,6 +33,11 @@ INCOMPLETE_STAGE_TO_BREAK = {
     "control_last_out": ("soft_drop", "control_consume_or_reuse"),
 }
 
+DEFAULT_DEADLINES_MS = {
+    "planning_total_deadline": 80.0,
+    "planning_to_control_deadline": 15.0,
+    "e2e_rt_deadline": 150.0,
+}
 
 def read_csv_rows(path: Path) -> List[Dict[str, str]]:
     with path.open("r", encoding="utf-8-sig", newline="") as f:
@@ -189,6 +194,103 @@ def nearest_gap_context(reference_times_ns: Sequence[int], current_ns: int) -> T
     return prev_ns, next_ns, gap_ms
 
 
+def relative_s(ns: Optional[int], run_start_ns: int) -> Optional[float]:
+    if not ns:
+        return None
+    return (ns - run_start_ns) / 1e9
+
+
+def is_at_or_after_s(ns: Optional[int], run_start_ns: int, start_s: Optional[float]) -> bool:
+    if start_s is None:
+        return True
+    rel = relative_s(ns, run_start_ns)
+    return rel is not None and rel >= start_s
+
+
+def choose_best_e2e_row(rows: Sequence[Dict[str, str]]) -> Dict[str, str]:
+    def score(row: Dict[str, str]) -> Tuple[int, int, int, int]:
+        anchors = sum(1 for key in (
+            "sensor_origin_ns",
+            "fusion_output_ns",
+            "prediction_input_ns",
+            "prediction_output_ns",
+            "planning_input_ns",
+            "planning_output_ns",
+            "first_control_consume_ns",
+            "first_control_output_ns",
+            "last_control_output_ns",
+        ) if nonzero_int(row.get(key)))
+        sensor_rank = 1 if (row.get("sensor_kind") or "").lower() == "lidar" else 0
+        rt = to_float(row.get("reaction_time_ms"), 0.0) or 0.0
+        age = to_float(row.get("data_lifetime_ms")) or to_float(row.get("data_age_ms"), 0.0) or 0.0
+        return (to_int(row.get("complete_path"), 0), anchors, int(max(rt, age) * 1000), sensor_rank)
+
+    return max(rows, key=score)
+
+
+def e2e_rows_by_fusion(e2e_rows: Sequence[Dict[str, str]]) -> Dict[str, Dict[str, str]]:
+    grouped: Dict[str, List[Dict[str, str]]] = defaultdict(list)
+    for row in e2e_rows:
+        fusion_trace_id = row.get("fusion_trace_id") or ""
+        if fusion_trace_id:
+            grouped[fusion_trace_id].append(row)
+    return {trace_id: choose_best_e2e_row(rows) for trace_id, rows in grouped.items()}
+
+
+def control_rows_by_trace(control_rows: Sequence[Dict[str, str]]) -> Dict[str, Dict[str, str]]:
+    rows: Dict[str, Dict[str, str]] = {}
+    for row in control_rows:
+        fusion_trace_id = row.get("fusion_trace_id") or ""
+        if fusion_trace_id:
+            rows[fusion_trace_id] = row
+    return rows
+
+
+def planning_output_rows(e2e_rows: Sequence[Dict[str, str]]) -> List[Dict[str, str]]:
+    rows = [
+        row for row in e2e_rows_by_fusion(e2e_rows).values()
+        if nonzero_int(row.get("planning_output_ns"))
+    ]
+    rows.sort(key=lambda row: nonzero_int(row.get("planning_output_ns")) or 0)
+    return rows
+
+
+def consumed_control_rows(control_rows: Sequence[Dict[str, str]]) -> List[Dict[str, str]]:
+    rows = [row for row in control_rows if nonzero_int(row.get("first_control_consume_ns"))]
+    rows.sort(key=lambda row: nonzero_int(row.get("first_control_consume_ns")) or 0)
+    return rows
+
+
+def find_previous_control_reuse(control_rows: Sequence[Dict[str, str]], ns: int) -> Optional[Dict[str, str]]:
+    previous = None
+    for row in consumed_control_rows(control_rows):
+        first_consume = nonzero_int(row.get("first_control_consume_ns"))
+        last_output = nonzero_int(row.get("last_control_output_ns"))
+        if first_consume and last_output and first_consume <= ns < last_output:
+            previous = row
+        elif first_consume and first_consume > ns:
+            break
+    return previous
+
+
+def find_next_control_consume(control_rows: Sequence[Dict[str, str]], ns: int) -> Optional[Dict[str, str]]:
+    for row in consumed_control_rows(control_rows):
+        first_consume = nonzero_int(row.get("first_control_consume_ns"))
+        if first_consume and first_consume > ns:
+            return row
+    return None
+
+
+def read_event_rows(run_dir: Path, module: str) -> List[Dict[str, str]]:
+    events_dir = run_dir / "events"
+    if not events_dir.exists():
+        return []
+    rows: List[Dict[str, str]] = []
+    for path in sorted(events_dir.glob(f"{module}*.csv")):
+        rows.extend(read_csv_rows(path))
+    return rows
+
+
 def load_required_tables(run_dir: Path) -> Dict[str, List[Dict[str, str]]]:
     tables_dir = run_dir / "analysis" / "tables"
     required = {
@@ -301,6 +403,70 @@ def break_keys_for_stage(stage: str) -> Tuple[str, ...]:
     return mapping.get(stage, ("fusion_output_ns", "planning_input_ns", "first_control_consume_ns"))
 
 
+def build_planning_no_output_drop_rows(
+    run_dir: Path,
+    complete_reference_times: Sequence[int],
+    start_seq: int,
+) -> Tuple[List[Dict[str, object]], set, int]:
+    event_rows = [row for row in read_event_rows(run_dir, "planning") if row.get("module") == "planning"]
+    if not event_rows:
+        return [], set(), start_seq
+
+    outputs_by_trace: Dict[str, List[int]] = defaultdict(list)
+    for row in event_rows:
+        if row.get("phase") != "output_pub":
+            continue
+        trace_id = row.get("trace_id") or ""
+        out_ns = nonzero_int(row.get("mono_ns"))
+        if trace_id and out_ns:
+            outputs_by_trace[trace_id].append(out_ns)
+    for values in outputs_by_trace.values():
+        values.sort()
+
+    normal_output_times = sorted({t for times in outputs_by_trace.values() for t in times})
+    rows: List[Dict[str, object]] = []
+    traces_with_no_output = set()
+    seq = start_seq
+    for row in event_rows:
+        if row.get("phase") != "proc_enter":
+            continue
+        trace_id = row.get("trace_id") or ""
+        enter_ns = nonzero_int(row.get("mono_ns"))
+        if not trace_id or not enter_ns:
+            continue
+        matched_output = next((out_ns for out_ns in outputs_by_trace.get(trace_id, []) if out_ns >= enter_ns), None)
+        if matched_output:
+            continue
+        # Avoid treating collection tail truncation as a real planning drop.
+        _, resume_ns, _ = nearest_gap_context(normal_output_times or complete_reference_times, enter_ns)
+        if not resume_ns:
+            continue
+        last_good_ns, resume_ns, gap_ms = nearest_gap_context(normal_output_times or complete_reference_times, enter_ns)
+        expected_period_ms = EDGE_DEFAULT_PERIOD_MS["planning_internal"]
+        missed_period_count = int(max(0, math.floor(gap_ms / expected_period_ms) - 1)) if gap_ms else ""
+        rows.append({
+            "drop_event_id": seq,
+            "drop_type": "hard_drop",
+            "break_stage": "planning_internal",
+            "anchor_trace_id": trace_id,
+            "parent_trace_id": "",
+            "break_ns": enter_ns,
+            "last_good_ns": last_good_ns or "",
+            "resume_ns": resume_ns or "",
+            "gap_ms": gap_ms,
+            "expected_period_ms": expected_period_ms,
+            "missed_period_count": missed_period_count,
+            "evidence_type": "no_output_pub",
+            "evidence_detail": (
+                f"module=planning; proc_enter_ns={enter_ns}; output_pub_missing=true; "
+                "allowed_no_output=false"
+            ),
+        })
+        traces_with_no_output.add(trace_id)
+        seq += 1
+    return rows, traces_with_no_output, seq
+
+
 def build_drop_events(
     run_dir: Path,
     handoff_rows: Sequence[Dict[str, str]],
@@ -308,6 +474,7 @@ def build_drop_events(
     e2e_rows: Sequence[Dict[str, str]],
     control_rows: Sequence[Dict[str, str]],
     soft_reuse_threshold: int = 4,
+    stale_grace_periods: int = 1,
 ) -> List[Dict[str, object]]:
     debug_dir = run_dir / "analysis" / "debug"
     unmatched_path = debug_dir / "handoff_unmatched.csv"
@@ -361,6 +528,13 @@ def build_drop_events(
         })
         seq += 1
 
+    planning_no_output_rows, no_output_traces, seq = build_planning_no_output_drop_rows(
+        run_dir,
+        complete_reference_times,
+        seq,
+    )
+    drop_events.extend(planning_no_output_rows)
+
     seen_incomplete = set()
     for row in incomplete_rows:
         missing_stage_text = row.get("missing_stage") or ""
@@ -370,6 +544,10 @@ def build_drop_events(
         fusion_trace_id = row.get("fusion_trace_id", "")
         parent_trace_id = row.get("parent_trace_id", "")
         for stage in stages:
+            if stage == "planning_out" and fusion_trace_id in no_output_traces:
+                continue
+            if stage == "first_control_consume" and nonzero_int(row.get("planning_output_ns")):
+                continue
             drop_type, break_stage = INCOMPLETE_STAGE_TO_BREAK.get(stage, ("hard_drop", stage))
             key = (fusion_trace_id if drop_type != "parent_missing" else parent_trace_id, stage, drop_type)
             if key in seen_incomplete:
@@ -396,6 +574,43 @@ def build_drop_events(
             })
             seq += 1
 
+    consumed_by_trace = control_rows_by_trace(control_rows)
+    for row in planning_output_rows(e2e_rows):
+        fusion_trace_id = row.get("fusion_trace_id") or ""
+        if not fusion_trace_id or fusion_trace_id in consumed_by_trace:
+            continue
+        planning_out_ns = nonzero_int(row.get("planning_output_ns"))
+        if not planning_out_ns:
+            continue
+        previous_control = find_previous_control_reuse(control_rows, planning_out_ns)
+        next_control = find_next_control_consume(control_rows, planning_out_ns)
+        reused_trace = previous_control.get("fusion_trace_id", "") if previous_control else ""
+        next_trace = next_control.get("fusion_trace_id", "") if next_control else ""
+        evidence_type = "stale_replaced" if next_trace and next_trace != fusion_trace_id else "unused_by_control"
+        last_good_ns, resume_ns, gap_ms = nearest_gap_context(complete_reference_times, planning_out_ns)
+        missed_period_count = int(max(0, math.floor(gap_ms / control_period_ms) - 1)) if gap_ms and control_period_ms else ""
+        drop_events.append({
+            "drop_event_id": seq,
+            "drop_type": "soft_drop",
+            "break_stage": "control_consume_or_reuse",
+            "anchor_trace_id": fusion_trace_id,
+            "parent_trace_id": "",
+            "break_ns": planning_out_ns,
+            "last_good_ns": last_good_ns or "",
+            "resume_ns": resume_ns or "",
+            "gap_ms": gap_ms,
+            "expected_period_ms": control_period_ms,
+            "missed_period_count": missed_period_count,
+            "evidence_type": evidence_type,
+            "evidence_detail": (
+                f"planning_output_ns={planning_out_ns}; unused_by_control=true; "
+                f"previous_reused_trace={reused_trace}; next_consumed_trace={next_trace}; confidence=strong"
+            ),
+        })
+        seq += 1
+
+    planning_outputs = planning_output_rows(e2e_rows)
+    stale_grace_ns = int(max(stale_grace_periods, 0) * control_period_ms * 1e6)
     for row in control_rows:
         reuse_count = to_int(row.get("control_reuse_count"), 0)
         if reuse_count < soft_reuse_threshold:
@@ -404,6 +619,16 @@ def build_drop_events(
         first_output = nonzero_int(row.get("first_control_output_ns")) or 0
         last_output = nonzero_int(row.get("last_control_output_ns")) or 0
         reuse_tail_ms = ((last_output - first_output) / 1e6) if first_output and last_output and last_output >= first_output else None
+        newer_outputs = [
+            p for p in planning_outputs
+            if (p.get("fusion_trace_id") or "") != (row.get("fusion_trace_id") or "")
+            and (nonzero_int(p.get("planning_output_ns")) or 0) > first_output
+            and (nonzero_int(p.get("planning_output_ns")) or 0) + stale_grace_ns < last_output
+        ]
+        if not newer_outputs:
+            continue
+        first_stale = newer_outputs[0]
+        first_stale_ns = nonzero_int(first_stale.get("planning_output_ns")) or first_output
         drop_events.append({
             "drop_event_id": seq,
             "drop_type": "soft_drop",
@@ -417,7 +642,12 @@ def build_drop_events(
             "expected_period_ms": control_period_ms,
             "missed_period_count": max(reuse_count - 1, 0),
             "evidence_type": "stale_reuse",
-            "evidence_detail": f"control_reuse_count={reuse_count}; first_control_proc_id={row.get('first_control_proc_id','')}; last_control_proc_id={row.get('last_control_proc_id','')}",
+            "evidence_detail": (
+                f"control_reuse_count={reuse_count}; first_control_proc_id={row.get('first_control_proc_id','')}; "
+                f"last_control_proc_id={row.get('last_control_proc_id','')}; "
+                f"newer_planning_trace={first_stale.get('fusion_trace_id','')}; newer_planning_output_ns={first_stale_ns}; "
+                f"stale_grace_periods={stale_grace_periods}; confidence=strong"
+            ),
         })
         seq += 1
 
@@ -578,3 +808,326 @@ def build_latency_drop_alignment(
             "lead_lag_tag": lead_lag_tag,
         })
     return rows
+
+
+def max_value(values: Sequence[float]) -> Optional[float]:
+    clean = [v for v in values if v is not None]
+    return max(clean) if clean else None
+
+
+def summarize_values(values: Sequence[float]) -> Dict[str, Optional[float]]:
+    return {
+        "p50": percentile(values, 50),
+        "p95": percentile(values, 95),
+        "p99": percentile(values, 99),
+        "max": max_value(values),
+    }
+
+
+def build_steady_state_summary(
+    module_rows: Sequence[Dict[str, str]],
+    handoff_rows: Sequence[Dict[str, str]],
+    e2e_rows: Sequence[Dict[str, str]],
+    control_rows: Sequence[Dict[str, str]],
+    drop_rows: Sequence[Dict[str, object]],
+    run_start_ns: int,
+    steady_start_s: Optional[float],
+) -> List[Dict[str, object]]:
+    rows: List[Dict[str, object]] = []
+    scopes = [("raw", None), ("steady", steady_start_s)]
+    for scope, start_s in scopes:
+        scoped_e2e = [
+            row for row in e2e_rows
+            if is_at_or_after_s(choose_anchor_ns(row, ("sensor_origin_ns", "fusion_input_ns", "fusion_output_ns")), run_start_ns, start_s)
+        ]
+        complete_e2e = [row for row in scoped_e2e if to_int(row.get("complete_path"), 0) == 1]
+        scoped_modules = [
+            row for row in module_rows
+            if is_at_or_after_s(nonzero_int(row.get("enter_ns")), run_start_ns, start_s)
+        ]
+        scoped_handoffs = [
+            row for row in handoff_rows
+            if is_at_or_after_s(nonzero_int(row.get("mono_ns_src")), run_start_ns, start_s)
+        ]
+        scoped_controls = [
+            row for row in control_rows
+            if is_at_or_after_s(nonzero_int(row.get("first_control_consume_ns")), run_start_ns, start_s)
+        ]
+        scoped_drops = [
+            row for row in drop_rows
+            if is_at_or_after_s(nonzero_int(row.get("break_ns")), run_start_ns, start_s)
+        ]
+        rt_stats = summarize_values([to_float(row.get("reaction_time_ms")) for row in complete_e2e])
+        age_stats = summarize_values([
+            to_float(row.get("data_lifetime_ms")) or to_float(row.get("data_age_ms"))
+            for row in complete_e2e
+        ])
+        planning_stats = summarize_values([
+            to_float(row.get("latency_ms"))
+            for row in scoped_modules
+            if row.get("module") == "planning" and row.get("phase_label") == "total"
+        ])
+        wait_stats = summarize_values([
+            to_float(row.get("handoff_ms"))
+            for row in scoped_handoffs
+            if row.get("edge_name") == "planning_to_control"
+        ])
+        reuse_stats = summarize_values([to_float(row.get("control_reuse_count")) for row in scoped_controls])
+        rows.append({
+            "scope": scope,
+            "steady_start_s": start_s if start_s is not None else "",
+            "sample_count": len(scoped_e2e),
+            "complete_count": len(complete_e2e),
+            "drop_count_total": len(scoped_drops),
+            "rt_p50": rt_stats["p50"],
+            "rt_p95": rt_stats["p95"],
+            "rt_p99": rt_stats["p99"],
+            "rt_max": rt_stats["max"],
+            "data_age_p50": age_stats["p50"],
+            "data_age_p95": age_stats["p95"],
+            "data_age_p99": age_stats["p99"],
+            "data_age_max": age_stats["max"],
+            "planning_total_p95": planning_stats["p95"],
+            "planning_total_p99": planning_stats["p99"],
+            "planning_wait_p95": wait_stats["p95"],
+            "planning_wait_p99": wait_stats["p99"],
+            "reuse_p95": reuse_stats["p95"],
+            "reuse_p99": reuse_stats["p99"],
+        })
+    return rows
+
+
+def deadline_row(
+    scope: str,
+    metric_name: str,
+    obj: str,
+    start_anchor: str,
+    end_anchor: str,
+    threshold_ms: float,
+    values: Sequence[float],
+) -> Dict[str, object]:
+    clean = [v for v in values if v is not None]
+    miss_count = sum(1 for v in clean if v > threshold_ms)
+    eligible_count = len(clean)
+    return {
+        "scope": scope,
+        "metric_name": metric_name,
+        "object": obj,
+        "start_anchor": start_anchor,
+        "end_anchor": end_anchor,
+        "threshold_ms": threshold_ms,
+        "eligible_count": eligible_count,
+        "miss_count": miss_count,
+        "miss_rate_pct": (100.0 * miss_count / eligible_count) if eligible_count else "",
+    }
+
+
+def build_deadline_metrics(
+    module_rows: Sequence[Dict[str, str]],
+    handoff_rows: Sequence[Dict[str, str]],
+    e2e_rows: Sequence[Dict[str, str]],
+    run_start_ns: int,
+    steady_start_s: Optional[float],
+) -> List[Dict[str, object]]:
+    rows: List[Dict[str, object]] = []
+    for scope, start_s in (("raw", None), ("steady", steady_start_s)):
+        planning_values = [
+            to_float(row.get("latency_ms"))
+            for row in module_rows
+            if row.get("module") == "planning"
+            and row.get("phase_label") == "total"
+            and is_at_or_after_s(nonzero_int(row.get("enter_ns")), run_start_ns, start_s)
+        ]
+        handoff_values = [
+            to_float(row.get("handoff_ms"))
+            for row in handoff_rows
+            if row.get("edge_name") == "planning_to_control"
+            and is_at_or_after_s(nonzero_int(row.get("mono_ns_src")), run_start_ns, start_s)
+        ]
+        e2e_values = [
+            to_float(row.get("reaction_time_ms"))
+            for row in e2e_rows
+            if to_int(row.get("complete_path"), 0) == 1
+            and is_at_or_after_s(choose_anchor_ns(row, ("sensor_origin_ns", "fusion_input_ns", "fusion_output_ns")), run_start_ns, start_s)
+        ]
+        rows.extend([
+            deadline_row(
+                scope,
+                "planning_total_deadline",
+                "planning.total",
+                "proc_enter",
+                "output_pub",
+                DEFAULT_DEADLINES_MS["planning_total_deadline"],
+                planning_values,
+            ),
+            deadline_row(
+                scope,
+                "planning_to_control_deadline",
+                "planning_to_control",
+                "planning_out",
+                "control_in",
+                DEFAULT_DEADLINES_MS["planning_to_control_deadline"],
+                handoff_values,
+            ),
+            deadline_row(
+                scope,
+                "e2e_rt_deadline",
+                "e2e.reaction_time",
+                "sensor_origin",
+                "first_control_consume",
+                DEFAULT_DEADLINES_MS["e2e_rt_deadline"],
+                e2e_values,
+            ),
+        ])
+    return rows
+
+
+def lookup_phase_by_trace(module_rows: Sequence[Dict[str, str]]) -> Dict[str, Dict[str, float]]:
+    result: Dict[str, Dict[str, float]] = defaultdict(dict)
+    for row in module_rows:
+        trace_id = row.get("fusion_trace_id") or row.get("trace_id") or ""
+        if not trace_id:
+            continue
+        key = f"{row.get('module')}_{row.get('phase_label')}"
+        lat = to_float(row.get("latency_ms"))
+        if lat is not None:
+            result[trace_id][key] = lat
+    return result
+
+
+def lookup_handoff_by_trace(handoff_rows: Sequence[Dict[str, str]]) -> Dict[str, Dict[str, float]]:
+    result: Dict[str, Dict[str, float]] = defaultdict(dict)
+    for row in handoff_rows:
+        trace_id = row.get("trace_id") or ""
+        edge = row.get("edge_name") or ""
+        lat = to_float(row.get("handoff_ms"))
+        if trace_id and edge and lat is not None:
+            result[trace_id][edge] = lat
+    return result
+
+
+def classify_anomaly_root_cause(
+    complete_path: int,
+    planning_ms: Optional[float],
+    planning_wait_ms: Optional[float],
+    reuse_tail_ms: Optional[float],
+    reuse_count: Optional[float],
+    thresholds: Dict[str, Optional[float]],
+) -> str:
+    if complete_path != 1:
+        return "missing_path"
+    if planning_ms is not None and (planning_ms >= 80.0 or (thresholds.get("planning_p99") is not None and planning_ms >= thresholds["planning_p99"])):
+        return "planning_slow"
+    if planning_wait_ms is not None and (planning_wait_ms >= 15.0 or (thresholds.get("wait_p99") is not None and planning_wait_ms >= thresholds["wait_p99"])):
+        return "handoff_wait"
+    if (
+        reuse_count is not None
+        and thresholds.get("reuse_p99") is not None
+        and reuse_count >= thresholds["reuse_p99"]
+    ) or (reuse_tail_ms is not None and reuse_tail_ms >= 80.0):
+        return "reuse_tail"
+    return "mixed"
+
+
+def build_anomaly_frame_table(
+    module_rows: Sequence[Dict[str, str]],
+    handoff_rows: Sequence[Dict[str, str]],
+    e2e_rows: Sequence[Dict[str, str]],
+    control_rows: Sequence[Dict[str, str]],
+    run_start_ns: int,
+    steady_start_s: Optional[float],
+    top_n: int,
+) -> List[Dict[str, object]]:
+    phase_by_trace = lookup_phase_by_trace(module_rows)
+    handoff_by_trace = lookup_handoff_by_trace(handoff_rows)
+    control_by_trace = control_rows_by_trace(control_rows)
+    unique_e2e = list(e2e_rows_by_fusion(e2e_rows).values())
+    steady_complete = [
+        row for row in unique_e2e
+        if to_int(row.get("complete_path"), 0) == 1
+        and is_at_or_after_s(choose_anchor_ns(row, ("sensor_origin_ns", "fusion_input_ns", "fusion_output_ns")), run_start_ns, steady_start_s)
+    ]
+    thresholds = {
+        "rt_p99": percentile([to_float(row.get("reaction_time_ms")) for row in steady_complete], 99),
+        "age_p99": percentile([
+            to_float(row.get("data_lifetime_ms")) or to_float(row.get("data_age_ms"))
+            for row in steady_complete
+        ], 99),
+        "planning_p99": percentile([
+            to_float(row.get("latency_ms"))
+            for row in module_rows
+            if row.get("module") == "planning"
+            and row.get("phase_label") == "total"
+            and is_at_or_after_s(nonzero_int(row.get("enter_ns")), run_start_ns, steady_start_s)
+        ], 99),
+        "wait_p99": percentile([
+            to_float(row.get("handoff_ms"))
+            for row in handoff_rows
+            if row.get("edge_name") == "planning_to_control"
+            and is_at_or_after_s(nonzero_int(row.get("mono_ns_src")), run_start_ns, steady_start_s)
+        ], 99),
+        "reuse_p99": percentile([
+            to_float(row.get("control_reuse_count"))
+            for row in control_rows
+            if is_at_or_after_s(nonzero_int(row.get("first_control_consume_ns")), run_start_ns, steady_start_s)
+        ], 99),
+    }
+
+    candidates: List[Dict[str, object]] = []
+    for row in unique_e2e:
+        fusion_trace_id = row.get("fusion_trace_id") or ""
+        anchor_ns = choose_anchor_ns(row, ("sensor_origin_ns", "fusion_input_ns", "fusion_output_ns"))
+        is_steady = is_at_or_after_s(anchor_ns, run_start_ns, steady_start_s)
+        rt = to_float(row.get("reaction_time_ms"))
+        age = to_float(row.get("data_lifetime_ms")) or to_float(row.get("data_age_ms"))
+        rt_anomaly = rt is not None and thresholds["rt_p99"] is not None and rt > thresholds["rt_p99"]
+        age_anomaly = age is not None and thresholds["age_p99"] is not None and age > thresholds["age_p99"]
+        if not rt_anomaly and not age_anomaly:
+            continue
+        phase = phase_by_trace.get(fusion_trace_id, {})
+        handoff = handoff_by_trace.get(fusion_trace_id, {})
+        control = control_by_trace.get(fusion_trace_id, {})
+        first_output = nonzero_int(control.get("first_control_output_ns")) or nonzero_int(row.get("first_control_output_ns"))
+        last_output = nonzero_int(control.get("last_control_output_ns")) or nonzero_int(row.get("last_control_output_ns"))
+        reuse_tail = ((last_output - first_output) / 1e6) if first_output and last_output and last_output >= first_output else None
+        reuse_count = to_float(control.get("control_reuse_count")) or to_float(row.get("control_reuse_count"))
+        planning_ms = phase.get("planning_total")
+        planning_wait_ms = handoff.get("planning_to_control")
+        root_cause = classify_anomaly_root_cause(
+            to_int(row.get("complete_path"), 0),
+            planning_ms,
+            planning_wait_ms,
+            reuse_tail,
+            reuse_count,
+            thresholds,
+        )
+        score = max(
+            (rt / thresholds["rt_p99"]) if rt and thresholds["rt_p99"] else 0,
+            (age / thresholds["age_p99"]) if age and thresholds["age_p99"] else 0,
+        )
+        anomaly_type = "+".join(name for name, flag in (("RT", rt_anomaly), ("DataAge", age_anomaly)) if flag)
+        candidates.append({
+            "fusion_trace_id": fusion_trace_id,
+            "sensor_kind": row.get("sensor_kind", ""),
+            "anchor_ns": anchor_ns or "",
+            "relative_s": relative_s(anchor_ns, run_start_ns),
+            "is_steady": is_steady,
+            "reaction_time_ms": rt,
+            "data_age_ms": age,
+            "rt_threshold_ms": thresholds["rt_p99"],
+            "data_age_threshold_ms": thresholds["age_p99"],
+            "anomaly_type": anomaly_type,
+            "severity_score": score,
+            "root_cause_tag": root_cause,
+            "planning_total_ms": planning_ms,
+            "planning_wait_ms": planning_wait_ms,
+            "reuse_tail_ms": reuse_tail,
+            "control_reuse_count": reuse_count,
+            "complete_path": to_int(row.get("complete_path"), 0),
+            "evidence": (
+                f"planning_total={planning_ms}; planning_wait={planning_wait_ms}; "
+                f"reuse_tail={reuse_tail}; reuse_count={reuse_count}"
+            ),
+        })
+    candidates.sort(key=lambda row: (to_float(row.get("severity_score"), 0.0) or 0.0), reverse=True)
+    return candidates[:top_n]

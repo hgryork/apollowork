@@ -61,6 +61,8 @@ This is especially useful for:
 
 Use raw view when startup behavior matters. Use steady-state view when judging stable runtime performance. If startup instability or collection-boundary truncation is visible, keep raw and steady-state plots separate.
 
+The canonical builder emits `steady_state_summary.csv` with `raw` and `steady` scopes. Its inferred steady start is the first observed complete closed-loop control consumption, unless the caller overrides it with `--steady-start-s`.
+
 ## Anomaly rules
 
 Default anomaly rules should be explicit. Typical examples:
@@ -71,3 +73,5 @@ Default anomaly rules should be explicit. Typical examples:
 - Drop burst window: time bins where `drop_count_total` is unusually high relative to neighboring bins or full-run baseline.
 
 Always show counts with percentile-based anomaly thresholds.
+
+For drop rules, high `control_reuse_count` is not sufficient evidence for `soft_drop`. A `soft_drop` needs a newer planning output that was not consumed, was stale-replaced, or was provably delayed while an older trace kept being used.

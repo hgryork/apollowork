@@ -186,7 +186,7 @@ Prefer the bundled scripts when the task is to standardize outputs instead of on
   Use first when you need to verify that the run directory and required analysis tables are present and structurally usable.
 
 - `scripts/build_canonical_tables.py <run_dir>`
-  Use when the user wants canonical outputs for this skill. In `v1`, this script expects the standard analyzer outputs under `analysis/tables` and then produces skill-ready canonical tables, including `quality_table.csv`, `drop_event_table.csv`, `latency_timeline_table.csv`, and `latency_drop_alignment_table.csv`.
+  Use when the user wants canonical outputs for this skill. In `v1`, this script expects the standard analyzer outputs under `analysis/tables` and then produces skill-ready canonical tables, including `quality_table.csv`, `drop_event_table.csv`, `latency_timeline_table.csv`, `latency_drop_alignment_table.csv`, `steady_state_summary.csv`, `deadline_metrics.csv`, and `anomaly_frame_table.csv`.
 
 - `scripts/align_drop_latency.py <canonical_dir>`
   Use when canonical tables already exist and the task is to recompute time-bin views or drop-latency alignment without rebuilding everything else.
@@ -212,6 +212,7 @@ Do not skip these rules:
 - Never quote RT or Data Age without stating the time anchors.
 - Never merge incomplete-path samples into strict E2E statistics without calling that out.
 - Never describe a frame as a drop without naming the drop type and break stage.
+- Never treat high control reuse alone as `soft_drop`; require evidence that a newer planning output was not consumed or was stale-replaced.
 - Never describe correlation between drops and latency spikes without showing aligned time windows.
 - Never rely on one extreme sample if the window sample count is too small; always report counts.
 - Never collapse all sensors into one row when sensor-origin differences matter.
