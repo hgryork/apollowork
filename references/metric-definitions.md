@@ -27,6 +27,8 @@ Examples:
 - `planning_to_control_deadline = planning_out -> control_in < 15ms`
 - `e2e_rt_deadline = sensor_origin -> first_control_consume < 150ms`
 
+These values are examples, not universal constants. The canonical builder infers deadline thresholds from the observed planning period by default, and `deadline_metrics.csv` records `threshold_source` and `base_period_ms`. Use explicit overrides when the project has an operational SLA or a fixed frequency budget.
+
 Miss rate:
 
 - `miss_rate = miss_count / eligible_count`

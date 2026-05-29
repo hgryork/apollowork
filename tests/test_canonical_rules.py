@@ -8,7 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from apollo_perf_trace_lib import build_deadline_metrics, build_drop_events  # noqa: E402
+from apollo_perf_trace_lib import build_deadline_metrics, build_drop_events, infer_deadline_config  # noqa: E402
 
 
 def row(**kwargs):
@@ -93,13 +93,31 @@ class CanonicalRuleTests(unittest.TestCase):
             row(complete_path=1, sensor_origin_ns=2_000, reaction_time_ms=200),
         ]
 
-        metrics = build_deadline_metrics(module_rows, handoff_rows, e2e_rows, run_start_ns=1_000, steady_start_s=None)
+        deadlines = {
+            "planning_total_deadline": {"threshold_ms": 80.0, "threshold_source": "test", "base_period_ms": ""},
+            "planning_to_control_deadline": {"threshold_ms": 15.0, "threshold_source": "test", "base_period_ms": ""},
+            "e2e_rt_deadline": {"threshold_ms": 150.0, "threshold_source": "test", "base_period_ms": ""},
+        }
+        metrics = build_deadline_metrics(module_rows, handoff_rows, e2e_rows, run_start_ns=1_000, steady_start_s=None, deadline_config=deadlines)
         raw = {row["metric_name"]: row for row in metrics if row["scope"] == "raw"}
 
         self.assertEqual(raw["planning_total_deadline"]["eligible_count"], 2)
         self.assertEqual(raw["planning_total_deadline"]["miss_count"], 1)
         self.assertEqual(raw["planning_to_control_deadline"]["miss_count"], 1)
         self.assertEqual(raw["e2e_rt_deadline"]["miss_count"], 1)
+
+    def test_deadlines_are_inferred_from_planning_period_and_can_be_overridden(self):
+        module_rows = [
+            row(module="planning", phase_label="total", enter_ns=1_000_000),
+            row(module="planning", phase_label="total", enter_ns=51_000_000),
+            row(module="planning", phase_label="total", enter_ns=101_000_000),
+        ]
+        config = infer_deadline_config(module_rows, [], {"planning_total_deadline": 42.0})
+
+        self.assertEqual(config["planning_total_deadline"]["threshold_ms"], 42.0)
+        self.assertEqual(config["planning_total_deadline"]["threshold_source"], "override")
+        self.assertEqual(config["planning_to_control_deadline"]["threshold_ms"], 10.0)
+        self.assertEqual(config["e2e_rt_deadline"]["threshold_ms"], 100.0)
 
 
 if __name__ == "__main__":

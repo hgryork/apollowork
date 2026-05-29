@@ -328,7 +328,7 @@ Sensor 到 fusion：
 
 ### 4.2 deadline 与 miss rate 的统计口径
 
-本 SOP 不强制所有 run 立刻使用统一阈值，但强制统一统计方式。每一个 deadline 指标都必须写成三元组：`对象 + 起点/终点 + 阈值`。例如：
+本 SOP 不强制所有 run 使用同一个固定阈值，但强制统一统计方式。每一个 deadline 指标都必须写成三元组：`对象 + 起点/终点 + 阈值`，并记录阈值来源。阈值可以来自当前 run 的观测周期推断，也可以由项目 SLA 或实验频率显式覆盖。例如：
 
 - `planning_total_deadline = proc_enter -> output_pub < 80ms`
 - `planning_to_control_deadline = planning_out -> control_in < 15ms`

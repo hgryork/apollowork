@@ -33,7 +33,7 @@ INCOMPLETE_STAGE_TO_BREAK = {
     "control_last_out": ("soft_drop", "control_consume_or_reuse"),
 }
 
-DEFAULT_DEADLINES_MS = {
+FALLBACK_DEADLINES_MS = {
     "planning_total_deadline": 80.0,
     "planning_to_control_deadline": 15.0,
     "e2e_rt_deadline": 150.0,
@@ -179,6 +179,54 @@ def median_period_ms(values_ns: Sequence[int]) -> Optional[float]:
     if not diffs:
         return None
     return float(median(diffs))
+
+
+def infer_deadline_config(
+    module_rows: Sequence[Dict[str, str]],
+    e2e_rows: Sequence[Dict[str, str]],
+    overrides: Optional[Dict[str, float]] = None,
+) -> Dict[str, Dict[str, object]]:
+    overrides = overrides or {}
+    planning_enter_times = sorted({
+        nonzero_int(row.get("enter_ns"))
+        for row in module_rows
+        if row.get("module") == "planning" and row.get("phase_label") == "total"
+    } - {None})
+    e2e_anchor_times = sorted({
+        choose_anchor_ns(row, ("sensor_origin_ns", "fusion_input_ns", "fusion_output_ns"))
+        for row in e2e_rows
+        if to_int(row.get("complete_path"), 0) == 1
+    } - {None})
+    planning_period_ms = median_period_ms(planning_enter_times)
+    e2e_period_ms = median_period_ms(e2e_anchor_times)
+    base_period_ms = planning_period_ms or e2e_period_ms
+
+    if base_period_ms:
+        inferred = {
+            "planning_total_deadline": base_period_ms,
+            "planning_to_control_deadline": max(5.0, base_period_ms * 0.20),
+            "e2e_rt_deadline": base_period_ms * 2.0,
+        }
+        source = "inferred_from_planning_period"
+    else:
+        inferred = dict(FALLBACK_DEADLINES_MS)
+        source = "fallback_default"
+
+    result: Dict[str, Dict[str, object]] = {}
+    for metric_name, inferred_threshold in inferred.items():
+        if metric_name in overrides:
+            result[metric_name] = {
+                "threshold_ms": overrides[metric_name],
+                "threshold_source": "override",
+                "base_period_ms": base_period_ms or "",
+            }
+        else:
+            result[metric_name] = {
+                "threshold_ms": inferred_threshold,
+                "threshold_source": source,
+                "base_period_ms": base_period_ms or "",
+            }
+    return result
 
 
 def nearest_gap_context(reference_times_ns: Sequence[int], current_ns: int) -> Tuple[Optional[int], Optional[int], Optional[float]]:
@@ -903,9 +951,10 @@ def deadline_row(
     obj: str,
     start_anchor: str,
     end_anchor: str,
-    threshold_ms: float,
+    config: Dict[str, object],
     values: Sequence[float],
 ) -> Dict[str, object]:
+    threshold_ms = float(config["threshold_ms"])
     clean = [v for v in values if v is not None]
     miss_count = sum(1 for v in clean if v > threshold_ms)
     eligible_count = len(clean)
@@ -916,6 +965,8 @@ def deadline_row(
         "start_anchor": start_anchor,
         "end_anchor": end_anchor,
         "threshold_ms": threshold_ms,
+        "threshold_source": config.get("threshold_source", ""),
+        "base_period_ms": config.get("base_period_ms", ""),
         "eligible_count": eligible_count,
         "miss_count": miss_count,
         "miss_rate_pct": (100.0 * miss_count / eligible_count) if eligible_count else "",
@@ -928,6 +979,7 @@ def build_deadline_metrics(
     e2e_rows: Sequence[Dict[str, str]],
     run_start_ns: int,
     steady_start_s: Optional[float],
+    deadline_config: Dict[str, Dict[str, object]],
 ) -> List[Dict[str, object]]:
     rows: List[Dict[str, object]] = []
     for scope, start_s in (("raw", None), ("steady", steady_start_s)):
@@ -957,7 +1009,7 @@ def build_deadline_metrics(
                 "planning.total",
                 "proc_enter",
                 "output_pub",
-                DEFAULT_DEADLINES_MS["planning_total_deadline"],
+                deadline_config["planning_total_deadline"],
                 planning_values,
             ),
             deadline_row(
@@ -966,7 +1018,7 @@ def build_deadline_metrics(
                 "planning_to_control",
                 "planning_out",
                 "control_in",
-                DEFAULT_DEADLINES_MS["planning_to_control_deadline"],
+                deadline_config["planning_to_control_deadline"],
                 handoff_values,
             ),
             deadline_row(
@@ -975,7 +1027,7 @@ def build_deadline_metrics(
                 "e2e.reaction_time",
                 "sensor_origin",
                 "first_control_consume",
-                DEFAULT_DEADLINES_MS["e2e_rt_deadline"],
+                deadline_config["e2e_rt_deadline"],
                 e2e_values,
             ),
         ])

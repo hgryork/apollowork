@@ -16,6 +16,7 @@ from apollo_perf_trace_lib import (
     choose_anchor_ns,
     compute_run_start_ns,
     copy_csv,
+    infer_deadline_config,
     load_required_tables,
     to_int,
     write_csv_rows,
@@ -92,6 +93,8 @@ FIELDNAMES_DEADLINE = [
     "start_anchor",
     "end_anchor",
     "threshold_ms",
+    "threshold_source",
+    "base_period_ms",
     "eligible_count",
     "miss_count",
     "miss_rate_pct",
@@ -135,6 +138,30 @@ def infer_steady_start_s(e2e_rows, run_start_ns: int):
     return max((min(complete_anchors) - run_start_ns) / 1e9, 0.0)
 
 
+def load_deadline_overrides(args):
+    overrides = {}
+    if args.deadline_config:
+        path = Path(args.deadline_config).resolve()
+        data = json.loads(path.read_text(encoding="utf-8"))
+        aliases = {
+            "planning_total_deadline_ms": "planning_total_deadline",
+            "planning_to_control_deadline_ms": "planning_to_control_deadline",
+            "e2e_rt_deadline_ms": "e2e_rt_deadline",
+        }
+        for key, value in data.items():
+            metric_name = aliases.get(key, key)
+            overrides[metric_name] = float(value)
+    direct = {
+        "planning_total_deadline": args.planning_total_deadline_ms,
+        "planning_to_control_deadline": args.planning_to_control_deadline_ms,
+        "e2e_rt_deadline": args.e2e_rt_deadline_ms,
+    }
+    for key, value in direct.items():
+        if value is not None:
+            overrides[key] = float(value)
+    return overrides
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Build canonical Apollo perf trace tables and drop-latency alignment outputs.")
     parser.add_argument("run_dir", help="Run directory containing analysis outputs")
@@ -144,6 +171,10 @@ def main() -> int:
     parser.add_argument("--stale-grace-periods", type=int, default=1, help="Control periods allowed before a newer planning output is treated as stale")
     parser.add_argument("--steady-start-s", type=float, help="Override inferred steady-state start in seconds from run start")
     parser.add_argument("--top-anomaly-frames", type=int, default=50, help="Maximum rows in anomaly_frame_table.csv")
+    parser.add_argument("--deadline-config", help="Optional JSON deadline overrides by metric name, in milliseconds")
+    parser.add_argument("--planning-total-deadline-ms", type=float, help="Override planning total deadline in milliseconds")
+    parser.add_argument("--planning-to-control-deadline-ms", type=float, help="Override planning to control deadline in milliseconds")
+    parser.add_argument("--e2e-rt-deadline-ms", type=float, help="Override E2E reaction-time deadline in milliseconds")
     args = parser.parse_args()
 
     run_dir = Path(args.run_dir).resolve()
@@ -174,6 +205,7 @@ def main() -> int:
     steady_start_s = args.steady_start_s
     if steady_start_s is None:
         steady_start_s = infer_steady_start_s(e2e_rows, run_start_ns)
+    deadline_config = infer_deadline_config(module_rows, e2e_rows, load_deadline_overrides(args))
 
     drop_rows = build_drop_events(
         run_dir,
@@ -203,7 +235,7 @@ def main() -> int:
     )
     write_csv_rows(out_dir / "steady_state_summary.csv", steady_rows, FIELDNAMES_STEADY)
 
-    deadline_rows = build_deadline_metrics(module_rows, handoff_rows, e2e_rows, run_start_ns, steady_start_s)
+    deadline_rows = build_deadline_metrics(module_rows, handoff_rows, e2e_rows, run_start_ns, steady_start_s, deadline_config)
     write_csv_rows(out_dir / "deadline_metrics.csv", deadline_rows, FIELDNAMES_DEADLINE)
 
     anomaly_rows = build_anomaly_frame_table(
@@ -224,6 +256,7 @@ def main() -> int:
         "soft_reuse_threshold": args.soft_reuse_threshold,
         "stale_grace_periods": args.stale_grace_periods,
         "steady_start_s": steady_start_s,
+        "deadline_config": deadline_config,
         "rows": {
             "module_phase_table": len(module_rows),
             "message_handoff_table": len(handoff_rows),

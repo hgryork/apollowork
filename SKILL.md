@@ -187,6 +187,7 @@ Prefer the bundled scripts when the task is to standardize outputs instead of on
 
 - `scripts/build_canonical_tables.py <run_dir>`
   Use when the user wants canonical outputs for this skill. In `v1`, this script expects the standard analyzer outputs under `analysis/tables` and then produces skill-ready canonical tables, including `quality_table.csv`, `drop_event_table.csv`, `latency_timeline_table.csv`, `latency_drop_alignment_table.csv`, `steady_state_summary.csv`, `deadline_metrics.csv`, and `anomaly_frame_table.csv`.
+  Deadline thresholds are inferred from the run's observed planning period unless overridden with `--deadline-config`, `--planning-total-deadline-ms`, `--planning-to-control-deadline-ms`, or `--e2e-rt-deadline-ms`.
 
 - `scripts/align_drop_latency.py <canonical_dir>`
   Use when canonical tables already exist and the task is to recompute time-bin views or drop-latency alignment without rebuilding everything else.
@@ -210,6 +211,7 @@ Do not skip these rules:
 
 - Never compute module timing from `data_ts_ns`; use `mono_ns` for runtime latency.
 - Never quote RT or Data Age without stating the time anchors.
+- Never present deadline miss rates without stating whether thresholds were inferred from the run period or explicitly overridden.
 - Never merge incomplete-path samples into strict E2E statistics without calling that out.
 - Never describe a frame as a drop without naming the drop type and break stage.
 - Never treat high control reuse alone as `soft_drop`; require evidence that a newer planning output was not consumed or was stale-replaced.

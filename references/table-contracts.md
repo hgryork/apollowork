@@ -62,7 +62,7 @@ This reference defines what each canonical table row means and what fields must 
 ## deadline_metrics
 
 - One row = one deadline definition in one scope.
-- Required fields: `scope`, `metric_name`, `object`, `start_anchor`, `end_anchor`, `threshold_ms`, `eligible_count`, `miss_count`, `miss_rate_pct`.
+- Required fields: `scope`, `metric_name`, `object`, `start_anchor`, `end_anchor`, `threshold_ms`, `threshold_source`, `base_period_ms`, `eligible_count`, `miss_count`, `miss_rate_pct`.
 - Missing-path samples must not enter strict E2E deadline denominators.
 
 ## anomaly_frame_table
