@@ -1,0 +1,6 @@
+interface:
+  display_name: "Apollo Perf Trace Analysis"
+  short_description: "Apollo perf trace latency and drop analysis"
+  default_prompt: "Use $apollo-perf-trace-analysis to analyze an Apollo perf trace run from events, message_context, and fusion_inputs."
+policy:
+  allow_implicit_invocation: true
