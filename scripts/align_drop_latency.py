@@ -9,6 +9,7 @@ from apollo_perf_trace_lib import (
     build_latency_drop_alignment,
     build_latency_timeline,
     compute_run_start_ns,
+    infer_deadline_config,
     read_csv_rows,
     write_csv_rows,
 )
@@ -20,26 +21,58 @@ FIELDNAMES_TIMELINE = [
     "rt_p50",
     "rt_p95",
     "rt_p99",
+    "rt_miss_count",
+    "rt_miss_rate_pct",
     "data_age_p50",
     "data_age_p95",
     "data_age_p99",
+    "data_age_miss_count",
+    "data_age_miss_rate_pct",
     "planning_total_p50",
     "planning_total_p95",
+    "planning_total_p99",
+    "planning_total_miss_count",
+    "planning_total_miss_rate_pct",
     "planning_wait_p95",
+    "planning_wait_p99",
+    "planning_wait_miss_count",
+    "planning_wait_miss_rate_pct",
     "reuse_p95",
+    "reuse_p99",
 ]
 FIELDNAMES_ALIGNMENT = [
     "time_bin_s",
     "drop_count_total",
     "drop_count_by_stage",
     "rt_p95",
+    "rt_p99",
+    "rt_miss_rate_pct",
     "data_age_p95",
+    "data_age_p99",
+    "data_age_miss_rate_pct",
     "planning_total_p95",
+    "planning_total_p99",
+    "planning_total_miss_rate_pct",
     "planning_wait_p95",
+    "planning_wait_p99",
+    "planning_wait_miss_rate_pct",
     "reuse_p95",
+    "reuse_p99",
+    "rt_miss_p99_alignment",
+    "data_age_miss_p99_alignment",
     "corr_tag",
     "lead_lag_tag",
 ]
+
+
+def load_deadline_config(canonical_dir: Path, module_rows, e2e_rows):
+    summary_path = canonical_dir / "build_summary.json"
+    if summary_path.exists():
+        data = json.loads(summary_path.read_text(encoding="utf-8"))
+        config = data.get("deadline_config")
+        if isinstance(config, dict):
+            return config
+    return infer_deadline_config(module_rows, e2e_rows, {})
 
 
 def main() -> int:
@@ -56,7 +89,8 @@ def main() -> int:
     drop_rows = read_csv_rows(canonical_dir / "drop_event_table.csv")
 
     run_start_ns = compute_run_start_ns(module_rows, handoff_rows, e2e_rows, control_rows)
-    timeline_rows = build_latency_timeline(module_rows, handoff_rows, e2e_rows, control_rows, run_start_ns, args.bin_seconds)
+    deadline_config = load_deadline_config(canonical_dir, module_rows, e2e_rows)
+    timeline_rows = build_latency_timeline(module_rows, handoff_rows, e2e_rows, control_rows, run_start_ns, args.bin_seconds, deadline_config)
     alignment_rows = build_latency_drop_alignment(timeline_rows, drop_rows, run_start_ns, args.bin_seconds)
 
     write_csv_rows(canonical_dir / "latency_timeline_table.csv", timeline_rows, FIELDNAMES_TIMELINE)

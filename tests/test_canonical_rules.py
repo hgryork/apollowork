@@ -8,7 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from apollo_perf_trace_lib import build_deadline_metrics, build_drop_events, infer_deadline_config  # noqa: E402
+from apollo_perf_trace_lib import build_deadline_metrics, build_drop_events, build_latency_timeline, infer_deadline_config  # noqa: E402
 
 
 def row(**kwargs):
@@ -97,6 +97,7 @@ class CanonicalRuleTests(unittest.TestCase):
             "planning_total_deadline": {"threshold_ms": 80.0, "threshold_source": "test", "base_period_ms": ""},
             "planning_to_control_deadline": {"threshold_ms": 15.0, "threshold_source": "test", "base_period_ms": ""},
             "e2e_rt_deadline": {"threshold_ms": 150.0, "threshold_source": "test", "base_period_ms": ""},
+            "e2e_data_age_deadline": {"threshold_ms": 180.0, "threshold_source": "test", "base_period_ms": ""},
         }
         metrics = build_deadline_metrics(module_rows, handoff_rows, e2e_rows, run_start_ns=1_000, steady_start_s=None, deadline_config=deadlines)
         raw = {row["metric_name"]: row for row in metrics if row["scope"] == "raw"}
@@ -105,6 +106,7 @@ class CanonicalRuleTests(unittest.TestCase):
         self.assertEqual(raw["planning_total_deadline"]["miss_count"], 1)
         self.assertEqual(raw["planning_to_control_deadline"]["miss_count"], 1)
         self.assertEqual(raw["e2e_rt_deadline"]["miss_count"], 1)
+        self.assertIn("e2e_data_age_deadline", raw)
 
     def test_deadlines_are_inferred_from_planning_period_and_can_be_overridden(self):
         module_rows = [
@@ -118,6 +120,41 @@ class CanonicalRuleTests(unittest.TestCase):
         self.assertEqual(config["planning_total_deadline"]["threshold_source"], "override")
         self.assertEqual(config["planning_to_control_deadline"]["threshold_ms"], 10.0)
         self.assertEqual(config["e2e_rt_deadline"]["threshold_ms"], 100.0)
+        self.assertEqual(config["e2e_data_age_deadline"]["threshold_ms"], 150.0)
+
+    def test_latency_timeline_includes_p99_and_miss_rates(self):
+        e2e_rows = [
+            row(complete_path=1, sensor_origin_ns=1_000_000_000, reaction_time_ms=80, data_age_ms=100),
+            row(complete_path=1, sensor_origin_ns=1_010_000_000, reaction_time_ms=200, data_age_ms=300),
+        ]
+        module_rows = [
+            row(module="planning", phase_label="total", enter_ns=1_000_000_000, latency_ms=60),
+            row(module="planning", phase_label="total", enter_ns=1_010_000_000, latency_ms=120),
+        ]
+        handoff_rows = [
+            row(edge_name="planning_to_control", mono_ns_src=1_000_000_000, handoff_ms=5),
+            row(edge_name="planning_to_control", mono_ns_src=1_010_000_000, handoff_ms=30),
+        ]
+        control_rows = [
+            row(first_control_consume_ns=1_000_000_000, control_reuse_count=1),
+            row(first_control_consume_ns=1_010_000_000, control_reuse_count=3),
+        ]
+        deadlines = {
+            "planning_total_deadline": {"threshold_ms": 80.0, "threshold_source": "test", "base_period_ms": ""},
+            "planning_to_control_deadline": {"threshold_ms": 15.0, "threshold_source": "test", "base_period_ms": ""},
+            "e2e_rt_deadline": {"threshold_ms": 150.0, "threshold_source": "test", "base_period_ms": ""},
+            "e2e_data_age_deadline": {"threshold_ms": 180.0, "threshold_source": "test", "base_period_ms": ""},
+        }
+
+        timeline = build_latency_timeline(module_rows, handoff_rows, e2e_rows, control_rows, run_start_ns=1_000_000_000, bin_seconds=1, deadline_config=deadlines)
+
+        self.assertEqual(len(timeline), 1)
+        self.assertIn("rt_p99", timeline[0])
+        self.assertIn("planning_wait_p99", timeline[0])
+        self.assertEqual(timeline[0]["rt_miss_count"], 1)
+        self.assertEqual(timeline[0]["data_age_miss_count"], 1)
+        self.assertEqual(timeline[0]["planning_total_miss_count"], 1)
+        self.assertEqual(timeline[0]["planning_wait_miss_count"], 1)
 
 
 if __name__ == "__main__":

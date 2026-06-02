@@ -46,11 +46,14 @@ This reference defines what each canonical table row means and what fields must 
 
 - One row = one time bin.
 - Required fields: `time_bin_s`, counts, RT/Data Age/Planning summary statistics.
+- RT/Data Age fields must include `p50`, `p95`, `p99`, `miss_count`, and `miss_rate_pct` when deadline thresholds are available.
+- Planning and planning-to-control fields must include `p95`, `p99`, `miss_count`, and `miss_rate_pct` when deadline thresholds are available.
 
 ## latency_drop_alignment_table
 
 - One row = one aligned time bin.
-- Required fields: `time_bin_s`, `drop_count_total`, `rt_p95`, `data_age_p95`, `planning_total_p95`, `planning_wait_p95`, `reuse_p95`.
+- Required fields: `time_bin_s`, `drop_count_total`, `rt_p95`, `rt_p99`, `rt_miss_rate_pct`, `data_age_p95`, `data_age_p99`, `data_age_miss_rate_pct`, `planning_total_p95`, `planning_total_p99`, `planning_wait_p95`, `planning_wait_p99`, `reuse_p95`, `reuse_p99`.
+- Must include `rt_miss_p99_alignment` and `data_age_miss_p99_alignment` so reports can state whether miss-rate spikes align with tail latency.
 - Use this table whenever reasoning about drop-latency correlation.
 
 ## steady_state_summary

@@ -440,6 +440,99 @@ def cmd_drop_stack(args) -> Path:
     return out
 
 
+def cmd_standard_suite(args) -> Path:
+    rows = load_merged_timeline(args.canonical_dir)
+    run_start = load_run_start_ns(args.canonical_dir)
+    out_dir = Path(args.out_dir).resolve() if args.out_dir else args.canonical_dir / "plots" / "standard_suite"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    manifest = []
+
+    def write_chart(name: str, builder) -> None:
+        out = out_dir / f"{name}.svg"
+        try:
+            svg = builder()
+            out.write_text(svg, encoding="utf-8")
+            manifest.append({"name": name, "path": str(out), "status": "ok"})
+        except Exception as exc:
+            manifest.append({"name": name, "path": str(out), "status": "skipped", "reason": str(exc)})
+
+    write_chart(
+        "rt_p50_p95_p99",
+        lambda: line_chart_svg(
+            series_from_metrics(rows, ("rt_p50", "rt_p95", "rt_p99"), args.start_s, args.end_s),
+            "RT percentile timeline",
+            "p50/p95/p99 by time window",
+            "RT (ms)",
+        ),
+    )
+    write_chart(
+        "data_age_p50_p95_p99",
+        lambda: line_chart_svg(
+            series_from_metrics(rows, ("data_age_p50", "data_age_p95", "data_age_p99"), args.start_s, args.end_s),
+            "Data Age percentile timeline",
+            "p50/p95/p99 by time window",
+            "Data Age (ms)",
+        ),
+    )
+    write_chart(
+        "drop_vs_rt_p95",
+        lambda: dual_axis_svg(
+            series_from_metrics(rows, ("drop_count_total",), args.start_s, args.end_s),
+            series_from_metrics(rows, ("rt_p95",), args.start_s, args.end_s),
+            "Drop count vs RT P95",
+            "Check whether drop bursts align with high RT windows",
+            "drop count",
+            "RT P95 (ms)",
+        ),
+    )
+    write_chart(
+        "drop_vs_data_age_p95",
+        lambda: dual_axis_svg(
+            series_from_metrics(rows, ("drop_count_total",), args.start_s, args.end_s),
+            series_from_metrics(rows, ("data_age_p95",), args.start_s, args.end_s),
+            "Drop count vs Data Age P95",
+            "Check whether drop bursts align with stale-data windows",
+            "drop count",
+            "Data Age P95 (ms)",
+        ),
+    )
+    write_chart(
+        "rt_miss_rate_vs_rt_p99",
+        lambda: dual_axis_svg(
+            series_from_metrics(rows, ("rt_miss_rate_pct",), args.start_s, args.end_s),
+            series_from_metrics(rows, ("rt_p99",), args.start_s, args.end_s),
+            "RT miss rate vs RT P99",
+            "Required check for tail-driven RT deadline misses",
+            "RT miss rate (%)",
+            "RT P99 (ms)",
+        ),
+    )
+    write_chart(
+        "data_age_miss_rate_vs_data_age_p99",
+        lambda: dual_axis_svg(
+            series_from_metrics(rows, ("data_age_miss_rate_pct",), args.start_s, args.end_s),
+            series_from_metrics(rows, ("data_age_p99",), args.start_s, args.end_s),
+            "Data Age miss rate vs Data Age P99",
+            "Required check for tail-driven Data Age deadline misses",
+            "Data Age miss rate (%)",
+            "Data Age P99 (ms)",
+        ),
+    )
+    write_chart(
+        "drop_count_by_break_stage",
+        lambda: stacked_bar_svg(
+            build_drop_stack_series(args.canonical_dir, run_start, args.bin_seconds, args.start_s, args.end_s, args.top_n),
+            "Drop counts by break stage",
+            f"top {args.top_n} break stages; bin={args.bin_seconds}s",
+            "drop count",
+        ),
+    )
+
+    manifest_path = out_dir / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    return manifest_path
+
+
 def safe(text: str) -> str:
     return "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in text)
 
@@ -505,6 +598,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--subtitle")
     p.add_argument("--out")
     p.set_defaults(func=cmd_drop_stack)
+
+    p = sub.add_parser("standard-suite", help="Render the minimum standard report chart suite")
+    p.add_argument("--bin-seconds", type=int, default=1)
+    p.add_argument("--start-s", type=int)
+    p.add_argument("--end-s", type=int)
+    p.add_argument("--top-n", type=int, default=6)
+    p.add_argument("--out-dir")
+    p.set_defaults(func=cmd_standard_suite)
     return parser
 
 

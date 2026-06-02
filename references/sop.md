@@ -2,8 +2,6 @@
 
 本文档用于固定 Apollo 端到端性能打点的标准分析流程。SOP 只依赖三张原始表：`events`、`message_context`、`fusion_inputs`。所有后续的模块耗时、模块间传递、端到端时延、控制复用、异常帧归因、丢帧位置分布、丢帧时间线与时延时间线相关性分析，都必须能够回溯到这三张原始表，不依赖额外的黑盒结论。这样做的目的不是把一次分析写得很复杂，而是把整套能力固定下来，使每次实验都能用同一套步骤、同一套口径、同一套输出物来判断系统状态，并且让不同 run 之间具备可比性。
 
----
-
 ## 1. 目标、适用范围与分析原则
 
 这套 SOP 面向 Apollo 闭环链路性能分析，核心目标有四个。第一，给出稳定、可复现的模块级和端到端时延统计，回答“系统这次整体快不快”。第二，对异常帧做逐帧归因，回答“为什么慢，是谁慢，慢在计算、等待、复用还是链路缺段”。第三，把丢帧从简单计数升级为“位置分布 + 时间分布 + 与时延尖峰的关系”，回答“丢在什么地方、丢的时候系统发生了什么、丢帧和时延尖峰是否同一时段集中出现”。第四，把每次分析结果固定成标准表和标准报告，形成长期可回归的工程基线。
@@ -13,8 +11,6 @@
 分析时必须遵守三个原则。第一，原始表不直接给结论，必须先派生成标准中间表。第二，所有指标必须写明锚点，也就是“从什么时候算到什么时候”，避免同一个名字在不同文档里含义不同。第三，任何异常判断都必须同时给出数值证据和时间上下文，不能只说“有异常”而不说明“异常发生在哪一段、离正常值差多少、是否伴随丢帧或复用”。
 
 除了这三个总原则，还要增加两个执行原则。其一，SOP 中所有“建议输出”的内容，如果要长期回归，就必须进一步收敛为“必选输出”或“可选输出”，不能永远停留在建议层。其二，任何派生表一旦进入正式分析口径，就要固定其一行语义、主键语义、时间锚点和缺失值定义，否则不同脚本作者会不自觉地用出不同版本。
-
----
 
 ## 2. 三张原始表的角色、字段语义与分析边界
 
@@ -33,7 +29,7 @@
 
 基于 `events` 能直接得到模块总耗时、子阶段耗时、周期抖动、phase 长尾、模块级 deadline miss rate，以及启动阶段极端值样本。`events` 的局限也要写清：它只能说明“模块内部发生了什么”，不能单独说明“消息为什么没有到下游”，也不能单独说明“同一 fusion 帧到底由哪些 sensor parent 组成”。因此 `events` 不能脱离其他两张表单独使用。
 
-在执行上还要额外强调一点：`events` 里很多 phase 不是天然成对出现的，必须通过配置把“哪些 phase 可以配对、哪些只能当标记点、哪些需要特殊处理”固定下来。否则同一个模块不同人会配出不同的 total，最后连基本分位值都无法对齐。
+在执行上还要额外强调一点：`events` 里很多 phase 不是天然成对出现的，必须通过配置把“哪些 phase 可以配对、哪些只能当标记点、哪些需要特殊处理”固定下来。否则同一个模块不同人会配出不同的 `total`，最后连基本分位值都无法对齐。
 
 ### 2.2 `message_context`：输入输出边界表
 
@@ -64,7 +60,7 @@
 | `fusion_trace_id` | fusion 输出帧 ID | 连接下游统一帧 |
 | `parent_trace_id` | 某一路 sensor parent 帧 ID | 连接感知源头 |
 | `is_main_sensor` | 是否主 sensor | 做主辅传感器分析 |
-| 其他派生识别字段 | 由 trace kind 或模块名补全 | 区分 lidar / radar / camera |
+| 其他派生识别字段 | 由 trace kind 或模块名补全 | 区分 `lidar` / `radar` / `camera` |
 
 基于 `fusion_inputs` 可以回答“这帧 fusion 到底用了哪些 parent”“某一路 parent 是否缺位”“同一 fusion 帧中不同 sensor 的起点时间为什么不同”“为什么 radar 的 RT/Data Age 可以显著低于 lidar”。它本身不提供时间差，必须与 `events` 中的 `proc_enter`、`output_pub` 组合后，才能得到 `sensor_origin_ns` 和 `fusion_output_ns`。
 
@@ -75,8 +71,6 @@
 这三张原始表组合起来，已经足以完成以下分析：模块内 phase 耗时、模块间 handoff、sensor 到 fusion 的桥接、E2E 时延、控制复用、异常帧归因、丢帧位置分布、丢帧时间线、丢帧与时延时间线相关性。也就是说，只要这三张表是完整的，就能形成一套闭环链路画像。SOP 的重点不是继续堆更多指标，而是把这套能力固定成统一结构，并保证每个派生结论都能追溯到原始表。
 
 不过能力边界也要说实话。仅靠这三张表，我们能定位到“哪一段慢、哪一段断、哪一段复用高、这些现象是否同时发生”，但还不能直接回答“CPU 被谁抢了、线程是否被 OS 抢占、writer 是否阻塞、系统负载是否是根因”。这些属于更低层系统观测，不在本 SOP 的必选范围内。把边界先写清楚，反而能避免后续误用。
-
----
 
 ## 3. 派生表体系：标准中间表、表结构与功能定义
 
@@ -106,7 +100,7 @@
 
 作用是提供模块内耗时明细、分位统计和异常样本。后续所有 “planning total p99”“planner 是否形成长尾”“control solve 是否稳定” 这类分析都应来自该表，而不是直接在原始 `events` 上重复写脚本。
 
-为了让这张表真正可执行，还要把生成规则写清楚。对于明确成对的 phase，优先用 `trace_id` 严格配对；若 `trace_id` 缺失且配置允许，可退化为时间窗配对，但必须在 `pair_method` 中显式标明。对于 `control` 这种同时有 `proc_id` 和 `trace_id` 的模块，要规定 total 和子 phase 是优先按 `proc_id` 还是按 `trace_id` 构建，避免一个分析以周期为主、另一个分析以帧为主，最后统计口径冲突。
+为了让这张表真正可执行，还要把生成规则写清楚。对于明确成对的 phase，优先用 `trace_id` 严格配对；若 `trace_id` 缺失且配置允许，可退化为时间窗配对，但必须在 `pair_method` 中显式标明。对于 `control` 这种同时有 `proc_id` 和 `trace_id` 的模块，要规定 `total` 和子 phase 是优先按 `proc_id` 还是按 `trace_id` 构建，避免一个分析以周期为主、另一个分析以帧为主，最后统计口径冲突。
 
 ### 3.2 `message_handoff_table`
 
@@ -182,12 +176,12 @@ SOP 里必须再补一条：`e2e_frame_table` 的一行语义必须固定为一�
 | `first_control_output_ns` | 首次控制输出时间 |
 | `last_control_output_ns` | 最后一次控制输出时间 |
 | `control_reuse_count` | 被多少个 control 周期复用 |
-| `consume_proc_ids` | 消费它的 proc_id 列表 |
+| `consume_proc_ids` | 消费它的 `proc_id` 列表 |
 | `reuse_tail_ms` | `last_control_output_ns - first_control_output_ns` |
 
 该表的意义是把“数据到了 control 之后发生了什么”单独剥离出来。很多时候 RT 不高但 Data Age 很高，本质不是前段慢，而是 control 长时间复用了旧 planning。没有这张表，就无法把“计算慢”和“复用久”拆开。
 
-为了让 reuse 分析不产生歧义，SOP 要规定：`control_reuse_count` 至少为 1，表示该 planning 帧至少被一个 control 周期消费过；如果某个 planning 帧从未被 control 有效消费，应单独标为 `unused_by_control`，不能简单记为 reuse=0 后混在普通分布里。
+为了让 reuse 分析不产生歧义，SOP 要规定：`control_reuse_count` 至少为 1，表示该 planning 帧至少被一个 control 周期消费过；如果某个 planning 帧从未被 control 有效消费，应单独标为 `unused_by_control`，不能简单记为 `reuse=0` 后混在普通分布里。
 
 ### 3.6 `quality_table`
 
@@ -227,7 +221,7 @@ SOP 里必须再补一条：`e2e_frame_table` 的一行语义必须固定为一�
 
 这张表是“丢帧位置分布”和“丢帧时间线”分析的基础。没有它，就只能得到笼统的丢帧率，无法说明发生在哪一级，也无法和时延时间线做对齐。
 
-这里最容易偷懒的地方，就是只产出一个丢帧计数，不产出 `evidence_detail`。SOP 明确要求每条 drop event 至少能用一句结构化文字说清楚它为什么被识别为 drop，例如“prediction out 存在，planning in 缺失，最近正常样本在 132.4s，恢复样本在 132.64s，空窗 240ms，约缺 2 拍”。没有这层证据，drop_event_table 的可解释性就不够。
+这里最容易偷懒的地方，就是只产出一个丢帧计数，不产出 `evidence_detail`。SOP 明确要求每条 drop event 至少能用一句结构化文字说清楚它为什么被识别为 drop，例如“prediction out 存在，planning in 缺失，最近正常样本在 132.4s，恢复样本在 132.64s，空窗 240ms，约缺 2 拍”。没有这层证据，`drop_event_table` 的可解释性就不够。
 
 ### 3.8 `latency_timeline_table`
 
@@ -237,15 +231,16 @@ SOP 里必须再补一条：`e2e_frame_table` 的一行语义必须固定为一�
 | --- | --- |
 | `time_bin_s` | 相对 run 起点的时间窗 |
 | `sample_count` | 窗内帧数 |
-| `rt_p50` / `rt_p95` / `rt_p99` | RT 分位 |
-| `data_age_p50` / `data_age_p95` / `data_age_p99` | Data Age 分位 |
-| `planning_total_p50` / `planning_total_p95` | Planning 总耗时 |
-| `planning_wait_p95` | `planning->control` 等待分位 |
-| `reuse_p95` | control 复用高位值 |
+| `rt_p50 / rt_p95 / rt_p99` | RT 分位 |
+| `data_age_p50 / data_age_p95 / data_age_p99` | Data Age 分位 |
+| `planning_total_p50 / planning_total_p95 / planning_total_p99` | Planning 总耗时 |
+| `planning_wait_p95 / planning_wait_p99` | `planning->control` 等待分位 |
+| `reuse_p95 / reuse_p99` | control 复用高位值 |
+| `rt_miss_rate / data_age_miss_rate / plan_ctrl_miss_rate` | 窗口级 miss rate |
 
 这张表的目的，是把“这一段时间系统状态如何”从逐帧视角转换为时间窗视角，从而和丢帧时间线进行对齐。
 
-为了方便不同 run 比较，建议额外保留窗口内 `complete_count`、`anomaly_count_rt`、`anomaly_count_age`。这样每次看到某一段 p95 抬升时，不仅知道数值高，还知道该段有没有明显增加异常帧密度。
+为了方便不同 run 比较，建议额外保留窗口内 `complete_count`、`anomaly_count_rt`、`anomaly_count_age`。这样每次看到某一段 p95 抬升时，不仅知道数值高，还知道该段有没有明显增加异常帧密度。与此同时，SOP 要明确增加一条：只要窗口里出现 miss rate 图，就不能只看 `miss_rate vs p95`，至少还要看 `miss_rate vs p99` 是否同窗抬升。因为 miss rate 是阈值指标，更贴近 tail 超时，很多时候它和 `p99` 的同步性强于和 `p95` 的同步性。
 
 ### 3.9 `latency_drop_alignment_table`
 
@@ -256,11 +251,12 @@ SOP 里必须再补一条：`e2e_frame_table` 的一行语义必须固定为一�
 | `time_bin_s` | 时间窗 |
 | `drop_count_total` | 窗内丢帧总数 |
 | `drop_count_by_stage` | 各断点数量汇总 |
-| `rt_p95` | 同窗 RT 高位值 |
-| `data_age_p95` | 同窗 Data Age 高位值 |
-| `planning_total_p95` | 同窗 Planning 高位值 |
-| `planning_wait_p95` | 同窗 Planning 到 Control 等待高位值 |
-| `reuse_p95` | 同窗控制复用高位值 |
+| `rt_p95 / rt_p99` | 同窗 RT 高位值与长尾值 |
+| `data_age_p95 / data_age_p99` | 同窗 Data Age 高位值与长尾值 |
+| `planning_total_p95 / planning_total_p99` | 同窗 Planning 高位值与长尾值 |
+| `planning_wait_p95 / planning_wait_p99` | 同窗 Planning 到 Control 等待高位值与长尾值 |
+| `reuse_p95 / reuse_p99` | 同窗控制复用高位值与长尾值 |
+| `rt_miss_rate / data_age_miss_rate` | 同窗 miss rate |
 | `corr_tag` | 该时间窗是否属于“丢帧与时延同时抬升” |
 | `lead_lag_tag` | 丢帧领先时延、同步发生、还是滞后发生 |
 
@@ -283,8 +279,6 @@ SOP 里必须再补一条：`e2e_frame_table` 的一行语义必须固定为一�
 9. 从 `drop_event_table + latency_timeline_table` 生成 `latency_drop_alignment_table`
 
 这样规定顺序的好处是，任何上游表如果重算，下游依赖表就知道必须同步重算，避免出现“E2E 表已经更新了，但 drop 表还是旧口径”的情况。SOP 要求每次 run 都在元数据里写出这些表的生成版本和依赖版本，确保结果可追溯。
-
----
 
 ## 4. 固定指标体系：模块、链路、端到端、复用与质量
 
@@ -328,11 +322,13 @@ Sensor 到 fusion：
 
 ### 4.2 deadline 与 miss rate 的统计口径
 
-本 SOP 不强制所有 run 使用同一个固定阈值，但强制统一统计方式。每一个 deadline 指标都必须写成三元组：`对象 + 起点/终点 + 阈值`，并记录阈值来源。阈值可以来自当前 run 的观测周期推断，也可以由项目 SLA 或实验频率显式覆盖。例如：
+本 SOP 不强制所有 run 使用同一个固定阈值，但强制统一统计方式。每一个 deadline 指标都必须写成三元组：对象 + 起点/终点 + 阈值，并记录阈值来源。阈值可以来自当前 run 的观测周期推断，也可以由项目 SLA 或实验频率显式覆盖。例如：
 
-- `planning_total_deadline = proc_enter -> output_pub < 80ms`
-- `planning_to_control_deadline = planning_out -> control_in < 15ms`
-- `e2e_rt_deadline = sensor_origin -> first_control_consume < 150ms`
+`planning_total_deadline = proc_enter -> output_pub < 80ms`
+
+`planning_to_control_deadline = planning_out -> control_in < 15ms`
+
+`e2e_rt_deadline = sensor_origin -> first_control_consume < 150ms`
 
 对应的 miss rate 统一定义为：
 
@@ -340,11 +336,13 @@ Sensor 到 fusion：
 
 其中 `eligible_count` 必须写清楚是“所有样本”还是“complete_path=1 的样本”。对于 incomplete 样本，建议单独统计 `missing_rate`，不要混入 miss rate。否则会把“超时”和“断链”混成一个指标，解释会非常混乱。
 
+这里要再补一条执行规则：凡是讨论 miss rate，不能只把 miss rate 和 `p95` 放在一起看。miss rate 是阈值越界频率，更接近 tail 行为，因此必须至少同步检查 miss rate 曲线与对应 `p99` 曲线是否同窗抬升。若 `miss rate` 和 `p99` 对齐、但和 `p95` 不对齐，应优先解释为长尾超时变多，而不是整体高位运行都在退化。若 `miss rate`、`p95`、`p99` 三者都同时抬升，才能说明高位与长尾都在恶化。
+
 ### 4.3 指标输出时必须带的辅助字段
 
-任何 p95、p99 指标都必须同时给出 `count` 和 `max`。如果样本数很低，单独的高分位值没有解释力。对于场景切片或时间窗切片，还必须保留 `sample_count`、`complete_count`、`drop_count_total` 三个字段。这样看到某个窗口 p99 特别高时，才能判断它是稳定异常，还是因为样本太少导致分位值漂移。
+任何 `p95`、`p99` 指标都必须同时给出 `count` 和 `max`。如果样本数很低，单独的高分位值没有解释力。对于场景切片或时间窗切片，还必须保留 `sample_count`、`complete_count`、`drop_count_total` 三个字段。这样看到某个窗口 `p99` 特别高时，才能判断它是稳定异常，还是因为样本太少导致分位值漂移。
 
-第一类是模块内指标，全部来自 `module_phase_table`。至少包括 `count`、`p50`、`p90`、`p95`、`p99`、`max`、`std`、`deadline_miss_rate`。对 planning、control 这类关键模块，还应进一步下钻子 phase，比如 `planner`、`runonce`、`solve`、`cmd_write` 之前的 post_solve 段。模块内指标回答的是“算得慢不慢，抖得厉不厉害，慢在总耗时还是慢在某一个子阶段”。
+第一类是模块内指标，全部来自 `module_phase_table`。至少包括 `count`、`p50`、`p90`、`p95`、`p99`、`max`、`std`、`deadline_miss_rate`。对 planning、control 这类关键模块，还应进一步下钻子 phase，比如 `planner`、`runonce`、`solve`、`cmd_write` 之前的 `post_solve` 段。模块内指标回答的是“算得慢不慢，抖得厉不厉害，慢在总耗时还是慢在某一个子阶段”。
 
 第二类是模块间 handoff 指标，全部来自 `message_handoff_table`。固定输出 `handoff_ms` 的各分位、未匹配率、边界 deadline miss rate，以及 `unmatched_reason` 分布。模块间指标回答的是“不是模块算得慢，而是消息传递或者调度等待变长了没有”。
 
@@ -355,8 +353,6 @@ Sensor 到 fusion：
 第五类是质量指标，来自 `quality_table`。包括 trace 覆盖率、完整帧比例、缺段分布、未匹配 handoff 比例、启动不稳定时长。它回答的是“这批数据能不能作为正式结果使用”。
 
 这五类指标已经构成一套稳定的时延分析骨架。之后无论是转弯段、路口段还是其他场景切片，都应该在这个骨架上做子集统计，而不是临时发明一套新口径。
-
----
 
 ## 5. 丢帧分析体系：分类、位置分布、时间分布与证据链
 
@@ -376,9 +372,9 @@ Sensor 到 fusion：
 
 `soft_drop` 的识别建议绑定业务闭环。典型规则是：某个新的 `fusion_trace_id` 已经到达 planning 输出，但在后续若干个 control 周期内没有成为 `first_control_consume_ns` 对应的最新消费对象，同时旧 trace 仍在被重复使用。如果新帧存在但没有进入有效控制闭环，应记为 `soft_drop` 或 `stale_replaced`。
 
-`replace_drop` 的识别建议依赖 `seq` 或下游 trace 跳跃。比如上游连续产生 A、B、C，而下游直接处理了 A、C，没有看到 B 的输入边界，也没有 B 的消费痕迹，则 B 可标记为替换型丢帧。若没有可靠的 `seq`，也可通过同一 channel 的 `trace_id` 单调序列和时间邻接关系做近似识别，但报告中应标注“弱证据”。
+`replace_drop` 的识别建议依赖 `seq` 或下游 trace 跳跃。比如上游连续产生 A、B、C，而下游直接处理了 A、C，没有看到 B 的输入边界，也没有 B 的消费痕迹，则 B 可标记为替换型丢帧。若没有可靠的 `seq`，也可通过同一 `channel` 的 `trace_id` 单调序列和时间邻接关系做近似识别，但报告中应标注“弱证据”。
 
-`parent_missing` 的识别建议从 `fusion_inputs` 出发。若某类传感器按配置应当参与但某窗口持续缺位，或者同一 `fusion_trace_id` 下 parent 数量明显少于正常工况，或者某一路 parent 虽存在但 `sensor_to_fusion_ms` 极端偏大、业务上已失去实时性，则可标为 parent 层丢帧或准丢帧。这里要强调，parent_missing 不等于 fusion trace 缺失，而是源头层信息缺位。
+`parent_missing` 的识别建议从 `fusion_inputs` 出发。若某类传感器按配置应当参与但某窗口持续缺位，或者同一 `fusion_trace_id` 下 `parent` 数量明显少于正常工况，或者某一路 `parent` 虽存在但 `sensor_to_fusion_ms` 极端偏大、业务上已失去实时性，则可标为 parent 层丢帧或准丢帧。这里要强调，`parent_missing` 不等于 `fusion_trace` 缺失，而是源头层信息缺位。
 
 ### 5.2 丢帧位置分布如何统计
 
@@ -422,9 +418,7 @@ Sensor 到 fusion：
 
 ### 5.5 丢帧分析中容易误判的三种情况
 
-第一种误判是把启动期不稳定当成丢帧。系统刚启动时，很多链路尚未形成稳定闭环，可能会出现 `no_dst_in` 或缺少完整配对，这种情况必须单独标记为 `startup_unstable`，不能直接并入稳态丢帧率。第二种误判是把 incomplete 样本一律当成 hard drop。有些 incomplete 是因为采集开关开启或关闭边界造成的截断，不一定是真实断链。第三种误判是把高复用直接当成丢帧。高复用更准确地说是“新数据没有及时接管”，只有当新帧已经存在却未进入有效消费链时，才应计为 `soft_drop`，否则只是 reuse 行为本身偏高。
-
----
+第一种误判是把启动期不稳定当成丢帧。系统刚启动时，很多链路尚未形成稳定闭环，可能会出现 `no_dst_in` 或缺少完整配对，这种情况必须单独标记为 `startup_unstable`，不能直接并入稳态丢帧率。第二种误判是把 incomplete 样本一律当成 `hard_drop`。有些 incomplete 是因为采集开关开启或关闭边界造成的截断，不一定是真实断链。第三种误判是把高复用直接当成丢帧。高复用更准确地说是“新数据没有及时接管”，只有当新帧已经存在却未进入有效消费链时，才应计为 `soft_drop`，否则只是 reuse 行为本身偏高。
 
 ## 6. 丢帧时间线与时延时间线对齐：标准做法与相关性分析
 
@@ -436,27 +430,27 @@ Sensor 到 fusion：
 
 ### 6.2 生成两条基础时间线
 
-第一条基础时间线是 `latency_timeline_table`。它记录每个时间窗里的 RT、Data Age、Planning total、Planning wait、Reuse 等分位统计。第二条基础时间线是丢帧时间线，可由 `drop_event_table` 按时间窗汇总得到，包含 `drop_count_total`、`drop_count_by_stage`、`missed_period_count_sum`、`gap_ms_max` 等。然后把两者左连接到同一个 `time_bin_s` 上，即得到 `latency_drop_alignment_table`。
+第一条基础时间线是 `latency_timeline_table`。它记录每个时间窗里的 RT、Data Age、Planning total、Planning wait、Reuse、RT miss rate、DataAge miss rate 等统计。第二条基础时间线是丢帧时间线，可由 `drop_event_table` 按时间窗汇总得到，包含 `drop_count_total`、`drop_count_by_stage`、`missed_period_count_sum`、`gap_ms_max` 等。然后把两者左连接到同一个 `time_bin_s` 上，即得到 `latency_drop_alignment_table`。
 
 ### 6.3 对齐后至少回答三个问题
 
 第一，丢帧高发时间窗是否伴随 RT 或 Data Age 高位值抬升。如果某一时间窗 `drop_count_total` 明显升高，同时 `rt_p95` 和 `data_age_p95` 也明显抬升，则说明丢帧与慢帧不是两类独立问题，而是同一时间段的系统异常。第二，抬升的主要对应项是什么。如果 `planning_total_p95` 随着丢帧一起抬升，说明更像规划计算或规划内部异常；如果 `planning_wait_p95` 与 `reuse_p95` 同步抬升，则更像 control 侧等待或复用问题。第三，二者谁领先。可以用相邻时间窗的前后关系给 `lead_lag_tag` 打标签，标记为“drop_leads_latency”“latency_leads_drop”“coincident”。这在工程上很重要，因为它能帮助判断丢帧是根因、共因，还是结果。
 
+这里还要补充一条和 miss rate 有关的规则：如果某段时间 `rt_miss_rate` 或 `data_age_miss_rate` 上升，不能只去对 `rt_p95` 或 `data_age_p95`。至少还要同步检查对应 `rt_p99`、`data_age_p99` 是否同窗抬升。因为 miss rate 本质上反映阈值越界频率，更常见地和 tail 恶化同步，而不一定和 `p95` 同步。
+
 ### 6.4 相关性分析的标准输出
 
-不建议只做肉眼看图，至少应固定三类量化结果。
+不建议只做肉眼看图，至少应固定四类量化结果。
 
-第一类是同窗相关性，例如计算 `drop_count_total` 与 `rt_p95`、`data_age_p95`、`planning_total_p95`、`planning_wait_p95`、`reuse_p95` 的 Pearson 或 Spearman 相关系数。第二类是阶段性相关性，例如 `planning_internal` 丢帧数与 `planning_total_p95` 的相关性、`planning_to_control` 丢帧数与 `planning_wait_p95` 的相关性。第三类是 lead/lag 对比，即比较 `drop_count_total(t)` 与 `rt_p95(t+1)`、`data_age_p95(t+1)` 的关系，判断丢帧是否领先下一个时间窗的时延恶化。
+第一类是同窗相关性，例如计算 `drop_count_total` 与 `rt_p95`、`rt_p99`、`data_age_p95`、`data_age_p99`、`planning_total_p95`、`planning_wait_p95`、`reuse_p95` 的 Pearson 或 Spearman 相关系数。第二类是阶段性相关性，例如 `planning_internal` 丢帧数与 `planning_total_p95` 的相关性、`planning_to_control` 丢帧数与 `planning_wait_p95` 的相关性。第三类是 lead/lag 对比，即比较 `drop_count_total(t)` 与 `rt_p95(t+1)`、`data_age_p95(t+1)` 的关系，判断丢帧是否领先下一个时间窗的时延恶化。第四类是 miss-rate 对齐相关性，例如比较 `rt_miss_rate(t)` 与 `rt_p99(t)`、`data_age_miss_rate(t)` 与 `data_age_p99(t)` 是否同窗同步抬升，用来判断 miss rate 的主解释更偏向长尾还是高位整体退化。
 
 这里要强调一点：相关性不是因果性。但在这套只依赖三张原始表的体系下，时间对齐后的相关性已经能把排查范围缩小很多。它能明确告诉我们，是“某些时间段既掉帧又变慢”，还是“系统一直有慢帧，但和丢帧并不同步”，这两种情况的排查方向完全不同。
 
 ### 6.5 时间线对齐后的必选图表
 
-为了避免每次报告只给表格而没有直观证据，建议固定四张图作为必选图。第一张是 `drop_count_total` 与 `rt_p95` 的双轴时间线图，用来看 RT 尖峰是否伴随丢帧高发。第二张是 `drop_count_total` 与 `data_age_p95` 的双轴时间线图，用来看数据年龄拉长是否伴随链路断点或 stale reuse。第三张是按 `break_stage` 堆叠的丢帧时间线图，用来看是哪个位置在某一时段集中恶化。第四张是 `planning_total_p95`、`planning_wait_p95`、`reuse_p95` 与丢帧数的组合图，用于区分“计算尖峰”“等待尖峰”“复用拖尾”三类模式。
+为了避免每次报告只给表格而没有直观证据，建议固定六张图作为必选图。第一张是 `drop_count_total` 与 `rt_p95` 的双轴时间线图，用来看 RT 尖峰是否伴随丢帧高发。第二张是 `drop_count_total` 与 `data_age_p95` 的双轴时间线图，用来看数据年龄拉长是否伴随链路断点或 stale reuse。第三张是按 `break_stage` 堆叠的丢帧时间线图，用来看是哪个位置在某一时段集中恶化。第四张是 `planning_total_p95`、`planning_wait_p95`、`reuse_p95` 与丢帧数的组合图，用于区分“计算尖峰”“等待尖峰”“复用拖尾”三类模式。第五张是 `rt_miss_rate` 与 `rt_p99` 的对齐图。第六张是 `data_age_miss_rate` 与 `data_age_p99` 的对齐图。
 
-图表本身不是结论，但它能把表格里不容易看出的同步性呈现出来。因此 SOP 不要求每次都画很多图，但这四张图应被视作最小集合。
-
----
+图表本身不是结论，但它能把表格里不容易看出的同步性呈现出来。因此 SOP 不要求每次都画很多图，但这六张图应被视作最小集合。尤其是 miss rate 相关图，不能只和 `p95` 对齐；`miss rate vs p99` 是必选证据，`miss rate vs p95` 最多只能作为补充图。
 
 ## 7. 标准执行流程：每次 run 必须按同一顺序落地
 
@@ -482,6 +476,8 @@ Sensor 到 fusion：
 
 输出模块内、模块间、E2E、复用、质量五类指标的全局汇总。这里是全 run 总览，回答“整体快不快、哪一跳最慢、Data Age 为什么高、丢帧主要集中在哪一级”。
 
+这一步要再加一条明确要求：凡是输出 miss rate，总结时必须同时给出阈值来源、对应 `p99`、以及一张时间线证据，不能只给一个比例。
+
 ### Step 6：稳态窗口切分
 
 把启动期和稳态期拆开。启动期极端值通常会拉坏图轴，也容易把系统尚未稳定阶段误判成算法尖峰。稳态窗口规则至少应包含：去掉明显启动不稳定时间段、优先使用 `complete_path=1` 样本、必要时单独输出 raw 与 steady 两套图。
@@ -494,7 +490,9 @@ Sensor 到 fusion：
 
 ### Step 8：时间线对齐与相关性分析
 
-生成 RT、Data Age、Planning total、Planning wait、Reuse 的时间线，再与丢帧时间线对齐。至少给出同窗高发段、同步抬升段、领先滞后关系和阶段相关性。此步骤的输出是判断“丢帧与时延是否同源”的关键。
+生成 RT、Data Age、Planning total、Planning wait、Reuse、RT miss rate、DataAge miss rate 的时间线，再与丢帧时间线对齐。至少给出同窗高发段、同步抬升段、领先滞后关系和阶段相关性。此步骤的输出是判断“丢帧与时延是否同源”的关键。
+
+同时要求对 miss rate 额外做一层检查：`rt_miss_rate` 至少和 `rt_p99` 对齐一次，`data_age_miss_rate` 至少和 `data_age_p99` 对齐一次。若 miss rate 与 `p99` 对得上、但和 `p95` 对不上，结论中要明确写出“这更像长尾超时变多，而不是高位整体退化”。
 
 ### Step 9：场景切片分析
 
@@ -503,8 +501,6 @@ Sensor 到 fusion：
 ### Step 10：形成标准报告与基线归档
 
 每次 run 必须输出标准报告、标准图、标准中间表和标准基线文件。报告负责讲清楚结论与归因，中间表负责可追溯性，基线文件负责后续 run-to-run 对比。只要 SOP 固定下来，后续每次实验就不再需要从零思考“这次应该看什么”。
-
----
 
 ## 8. 标准报告结构与固定输出物
 
@@ -516,9 +512,10 @@ Sensor 到 fusion：
 4. 丢帧位置分布：哪一级最常断，平均空窗多长。
 5. 丢帧时间线：哪些时间窗是丢帧高发段。
 6. 丢帧与时延对齐：丢帧与 RT/Data Age/Planning 是否在同窗同步抬升。
-7. 稳态与启动对比：排除启动异常后，系统稳态画像如何。
-8. 场景切片：如转弯段、路口段等特定工况下的变化。
-9. 行动建议：优先优化模块、边界还是复用策略。
+7. miss rate 与 p99 对齐：RT miss、DataAge miss 是否和对应 p99 曲线同窗抬升。
+8. 稳态与启动对比：排除启动异常后，系统稳态画像如何。
+9. 场景切片：如转弯段、路口段等特定工况下的变化。
+10. 行动建议：优先优化模块、边界还是复用策略。
 
 固定输出物建议至少包含：
 
@@ -538,25 +535,21 @@ Sensor 到 fusion：
 
 其中 `drop_event_table`、`latency_drop_alignment_table`、`steady_state_summary.csv`、`deadline_metrics.csv` 和 `anomaly_frame_table.csv` 是报告可信度的最小增强集合。后续所有“丢帧为什么发生、是不是和慢帧同一时段、启动期是否污染稳态、deadline miss 口径是什么、Top 异常帧先看谁”的问题都应先从这些表开始。
 
-如果团队希望把报告进一步模板化，还可以额外固定三类“必须有解释文字”的图：一张全局 E2E 图、一张 planning 关键图、一张 drop-latency 对齐图。图的数量不必多，但每张图下都必须写清“这张图要证明什么”，避免报告变成只堆图不解释。
-
----
+如果团队希望把报告进一步模板化，还可以额外固定几类“必须有解释文字”的图：一张全局 E2E 图、一张 planning 关键图、一张 drop-latency 对齐图、两张 miss rate vs p99 对齐图。图的数量不必多，但每张图下都必须写清“这张图要证明什么”，避免报告变成只堆图不解释。
 
 ## 9. 这套体系已经能够做到哪一步
 
-基于三张原始表，这套 SOP 已经能够稳定做到以下层级。第一，知道模块内哪里慢、模块间哪一跳慢、整条链路从 sensor 到 control 输出有多慢。第二，知道 Data Age 高是因为前面慢，还是因为 control 复用旧 planning。第三，知道异常帧是规划计算尖峰、边界等待变长、复用拖尾，还是链路缺段。第四，知道丢帧不是抽象的“丢了”，而是具体丢在 `prediction_to_planning`、`planning_internal`、`planning_to_control` 还是 sensor parent 层。第五，知道丢帧高发段是否和 RT、Data Age、Planning total 的尖峰发生在同一个时间窗，以及谁先出现。
+基于三张原始表，这套 SOP 已经能够稳定做到以下层级。第一，知道模块内哪里慢、模块间哪一跳慢、整条链路从 sensor 到 control 输出有多慢。第二，知道 Data Age 高是因为前面慢，还是因为 control 复用旧 planning。第三，知道异常帧是规划计算尖峰、边界等待变长、复用拖尾，还是链路缺段。第四，知道丢帧不是抽象的“丢了”，而是具体丢在 `prediction_to_planning`、`planning_internal`、`planning_to_control` 还是 sensor parent 层。第五，知道丢帧高发段是否和 RT、Data Age、Planning total 的尖峰发生在同一个时间窗，以及谁先出现。第六，知道 miss rate 的抬升更偏向高位退化还是长尾超时，因为可以把它和对应 `p99` 曲线做同窗对齐。
 
-换句话说，这套体系已经不是“做一个平均耗时表”，而是一套完整的链路级行为分析框架。它能够支持常规 run 评估，也能够支持专项问题分析，例如“为什么 radar 的 RT 比 lidar 低很多”“为什么某个转弯段 Planning p95 抬升”“为什么 Data Age 很高但 RT 还好”“为什么某段时间既掉帧又变慢”。只要坚持所有结论都回溯到三张原始表，这套体系就具备足够的可解释性和可维护性。
+换句话说，这套体系已经不是“做一个平均耗时表”，而是一套完整的链路级行为分析框架。它能够支持常规 run 评估，也能够支持专项问题分析，例如“为什么 radar 的 RT 比 lidar 低很多”“为什么某个转弯段 Planning p95 抬升”“为什么 Data Age 很高但 RT 还好”“为什么某段时间既掉帧又变慢”“为什么 miss rate 升高但 p95 看起来变化有限”。只要坚持所有结论都回溯到三张原始表，这套体系就具备足够的可解释性和可维护性。
 
 这套体系之所以足够强，不是因为它把所有问题都解决了，而是因为它把最关键的链路级问题都拆成了可执行的数据对象：phase、handoff、parent link、E2E frame、control usage、drop event、alignment timeline。只要这些对象被固定，后续你们是做单次分析、做自动化日报、还是做回归比对，都会顺很多。
-
----
 
 ## 10. 命名规范、配置规范与验收清单
 
 为避免后续脚本和报告口径漂移，建议把以下配置固定成单独文件并纳入版本管理：
 
-1. `PHASE_PAIR_CONFIG`：定义各模块 total 和子 phase 的 enter/exit 配对。
+1. `PHASE_PAIR_CONFIG`：定义各模块 `total` 和子 phase 的 enter/exit 配对。
 2. `HANDOFF_EDGE_CONFIG`：定义标准边，如 `perception_to_prediction`、`prediction_to_planning`、`planning_to_control`。
 3. `EXPECTED_PERIOD_CONFIG`：定义不同链路和模块的期望周期，用于 `missed_period_count`。
 4. `DROP_RULE_CONFIG`：定义 `hard_drop`、`soft_drop`、`replace_drop`、`parent_missing` 的识别规则。
@@ -571,6 +564,7 @@ Sensor 到 fusion：
 - 丢帧位置分布已完成。
 - 丢帧时间线已完成。
 - 时延时间线与丢帧时间线已完成对齐。
+- miss rate 与对应 `p99` 的对齐检查已完成。
 - 相关性结论已给出，并明确是同窗同步、领先还是滞后。
 - 标准报告已输出，且正文能在不看附录的情况下说明结论。
 
