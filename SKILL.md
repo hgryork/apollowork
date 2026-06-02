@@ -1,246 +1,240 @@
 ---
 name: apollo-perf-trace-analysis
-description: Use when analyzing Apollo perf trace run directories based on `events`, `message_context`, and `fusion_inputs`, especially for RT/Data Age, planning spikes, handoff delay, control reuse, drop-frame distribution, drop-latency alignment, standard reports, or drill-down by frame, time window, module, anomaly type, or break stage. Also use when the user asks in Chinese for ????????????????????????????????????????
+description: 用于基于 `events`、`message_context`、`fusion_inputs` 分析 Apollo perf trace run 目录，重点覆盖 RT/Data Age、分位数与 miss rate、planning spike、handoff delay、control reuse、丢帧位置分布、丢帧与时延对齐、下游对齐影响，以及按帧、按时间窗、按模块、按异常类型、按 break stage 的 drill-down。
 ---
 
 # Apollo Perf Trace Analysis
 
-## Overview
+## 概述
 
-Use this skill when the task is to analyze Apollo perf trace data from a run directory, especially when the source of truth is the three raw tables `events`, `message_context`, and `fusion_inputs`. The goal is not only to produce latency summaries, but to build a full-link explanation of module timing, handoff timing, RT, Data Age, control reuse, drop locations, and the relationship between drop bursts and latency spikes.
+当任务是分析 Apollo perf trace run 目录，而且事实来源是 `events`、`message_context`、`fusion_inputs` 三类原始表时，使用这个 skill。
 
-This skill is designed for interactive analysis. It should support both full-run overview mode and drill-down mode. If the user asks a vague question, start with overview mode and then recommend the next most useful drill-down. If the user asks for a specific frame, time window, module, anomaly set, or drop stage, switch directly to that mode.
+这套 skill 的目标不只是给出几个时延统计，而是解释清楚：
 
-## When To Use
+- 全链路时延在 `p50`、`p95`、`p99` 上分别是什么状态
+- miss rate 对应的阈值是什么，反映的是高位超时还是长尾超时
+- 丢帧发生在什么位置、什么时间、和时延尖峰是否同窗出现
+- deadline miss 之后，下游窗口里 lidar/radar 是否出现时间新鲜度错位
+- 高频输入变差时，主因是 compute、queue、handoff、reuse，还是 parent-origin 缺失
 
-Use this skill when one or more of the following are true:
+这套 skill 面向交互式分析，既支持 full-run 总览，也支持按时间窗、按帧、按模块、按 drop 的定向下钻。
 
-- The user wants Apollo full-link latency analysis based on perf trace output.
-- The user mentions `events`, `message_context`, `fusion_inputs`, `analysis/tables`, or `perf_trace`.
-- The user asks about RT, Data Age, planning spikes, handoff delay, control reuse, or radar versus lidar timing.
-- The user wants anomaly attribution, drop-frame location distribution, or drop-latency alignment.
-- The user wants a standard report or an SOP-consistent analysis result.
-- The user asks in Chinese for `??`, `????`, `???`, `?????`, `?????`, or `????`.
+## 适用场景
 
-Do not use this skill for generic system profiling, CPU flame graphs, kernel scheduling analysis, or debugging unrelated code paths unless the analysis still centers on Apollo perf trace tables.
+满足以下任一条件时应使用本 skill：
 
-## Required Inputs
+- 用户想基于 Apollo perf trace 输出做全链路性能分析
+- 用户提到 `events`、`message_context`、`fusion_inputs`、`analysis/tables` 或 `perf_trace`
+- 用户问 RT、Data Age、planning spike、handoff delay、control reuse、lidar/radar 差异
+- 用户想看异常归因、丢帧位置分布、丢帧-时延对齐、下游对齐影响
+- 用户想要标准报告、SOP 一致结论、回归对比结果
+- 用户想知道为什么高频输入下会出现慢帧、旧帧、错位帧
 
-Prefer a run directory that contains these raw sources:
+不要把这个 skill 用在通用 CPU profiler、内核调度、火焰图分析等与 Apollo perf trace 主链路无关的问题上，除非结论仍然以这三类原始表为中心。
+
+## 必要输入
+
+优先要求 run 目录中存在以下原始输入：
 
 - `events/`
 - `message_context/`
 - `fusion_inputs/`
 
-If derived analysis tables already exist, they may be used to accelerate the analysis, but the skill should still treat the three raw tables as the source of truth. When the skill relies on already-derived tables instead of rebuilding them, it must say so explicitly.
+如果已经存在派生分析表，可以用来加速分析，但仍应把三类原始表视为事实来源。若本次分析依赖已有派生表而不是从原始表重建，必须明确说出来。
 
-Before drawing conclusions, verify the data source state:
+在给出强结论前，先检查：
 
-1. Are all three raw table families present?
-2. Are shard files non-empty and structurally readable?
-3. Is there enough trace coverage and complete-path coverage to support E2E conclusions?
+1. 三类原始表是否齐全
+2. shard 是否非空且结构可读
+3. trace coverage 与 complete-path coverage 是否足够支撑 E2E 结论
+4. parent-origin 链接和关键 handoff match 是否足够支撑 sensor 级归因
 
-If one or more raw inputs are missing, downgrade the analysis scope and say exactly which parts are no longer trustworthy.
+若某些原始输入缺失，必须降级分析范围，并明确说明哪些结论不再可靠。
 
-## Interaction Modes
+## 默认分析口径
 
-This skill supports six primary interaction modes. The assistant should choose the mode from the user's request and keep the response shaped to that mode instead of always forcing a full report.
+除非用户明确要求其他约定，否则使用以下默认口径：
+
+- RT、Data Age、关键模块总耗时一律联合报告 `p50`、`p95`、`p99`
+- `p50` 表示典型水平，`p95` 表示高位运行水平，`p99` 表示长尾风险
+- miss rate 是阈值指标，不是 `p95` 的替代物
+- miss rate 要和阈值来源、`p99`、tail 样本数、代表窗口一起解释
+- 只要画 miss rate 相关图，至少要检查 miss rate 曲线是否和对应 `p99` 曲线同窗抬升，不能只和 `p95` 对齐
+- 只要 lidar/radar 可能分化，就按 `sensor_kind` 拆开看
+- 高频回归场景下，看到 `sensor_to_fusion` 或长 edge 变高后，必须继续拆 compute 和 wait/queue
+- 涉及 drops 或 deadline misses 时，必须把它们放到时延时间线上做对齐，不能孤立分析
+
+## 交互模式
 
 ### 1. Overview Mode
 
-Use when the user asks for a run summary, a first pass, or a general health check.
+适用于用户想看 run 总览、首次体检、全局健康状态。
 
-Typical requests:
+默认输出：
 
-- `???? run`
-- `???? RT ? Data Age ??`
-- `???????????`
-- `planning ???????`
-
-Default output:
-
-- Data quality conclusion
-- Global RT/Data Age summary
-- Module and handoff summary
-- Top anomaly counts
-- Drop location distribution summary
-- Drop-latency alignment summary
-- Suggested next drill-down
+- 数据质量结论
+- 全局 RT/Data Age 总览，包含 `p50`、`p95`、`p99`、miss rate
+- 模块与 handoff 总览
+- Top 异常计数与严重度
+- 丢帧位置分布概览
+- 丢帧-时延对齐概览
+- 如果相关，再给出下游 alignment impact 概览
+- 下一步最值得下钻的方向
 
 ### 2. Time Window Mode
 
-Use when the user asks for a specific time range or segment.
+适用于用户指定某个时间段。
 
-Typical requests:
+默认输出：
 
-- `? 25 ? 40 ?`
-- `?? 133 ? 147 ????`
-- `?? 50-71 ??????`
-- `? 100 ????????`
-
-Default output:
-
-- Window-level RT/Data Age statistics
-- Planning and handoff statistics in that window
-- Drop count and break-stage distribution in that window
-- Top anomaly frames in that window
-- Comparison against steady-state or full-run baseline
-- Local chart suggestions or generated charts if available
+- 窗口内 RT/Data Age `p50`、`p95`、`p99`
+- 窗口内 deadline miss 计数与比例
+- 窗口内 Planning 和 handoff 统计
+- 窗口内丢帧数与 break-stage 分布
+- 如果相关，给出窗口内 lidar/radar alignment delta
+- Top 异常帧
+- 与 steady-state 或全局基线对比
 
 ### 3. Frame Mode
 
-Use when the user asks for one frame, one trace, or the worst sample.
+适用于用户指定某一帧、最坏一帧、某个 `fusion_trace_id`。
 
-Typical requests:
+默认输出：
 
-- `? fusion_trace_id=...`
-- `??????? RT ?`
-- `? Data Age ??????`
-- `??????????`
-
-Default output:
-
-- Full time ledger from sensor origin to control outputs
-- Segment-by-segment contribution breakdown
-- Planning total / planner / runonce / wait / reuse details
-- Relative severity versus steady-state distribution
-- Attribution label and justification
-- Related drops in the same time window if any
+- 从 sensor origin 到 control outputs 的完整账本
+- 分段贡献拆解
+- planning total / planner / runonce / wait / reuse 细节
+- 与 steady-state 的相对严重度
+- 一个归因标签和数字证据
+- 附近是否存在 drops 或 miss windows
+- 如果需要，比较同一 fusion output 下的 lidar/radar parent
 
 ### 4. Module Or Edge Mode
 
-Use when the user focuses on a module or a handoff edge.
+适用于用户关注某个模块或某条边。
 
-Typical requests:
+默认输出：
 
-- `?? planning`
-- `? control ????`
-- `? prediction ? planning ???`
-- `? lidar_detection ??`
-
-Default output:
-
-- Module total and sub-phase statistics or edge handoff statistics
-- Timeline behavior and hotspot windows
-- Top slow samples
-- Overlap with anomaly frames or drops
-- Whether the issue is compute-dominant, wait-dominant, or data-quality-dominant
+- 模块总耗时或 edge handoff 统计
+- `p50`、`p95`、`p99`、miss rate、jitter
+- hotspot windows 和 top slow samples
+- 与异常帧或 drops 的重叠情况
+- 问题更像 compute、wait、queue，还是 freshness 问题
 
 ### 5. Anomaly Mode
 
-Use when the user wants abnormal samples or long-tail behavior.
+适用于用户想看长尾、异常样本、尖峰问题。
 
-Typical requests:
+默认输出：
 
-- `?? RT ??`
-- `? Data Age ??`
-- `? planning compute spike ???`
-- `?? reuse ??`
-
-Default output:
-
-- Rule used to identify anomalies
-- Severity bands and sample counts
-- Top representative samples
-- Clustered attribution patterns
-- Recommended next drill-down path
+- 异常规则
+- 各级严重度样本数
+- `p99`、top windows、代表帧证据
+- 归因模式聚类
+- 建议的下一步下钻方向
 
 ### 6. Drop Mode
 
-Use when the user asks specifically about drops, misses, or chain breaks.
+适用于用户专门问 drops、misses、chain break。
 
-Typical requests:
+默认输出：
 
-- `??????????`
-- `? planning_to_control ? drop`
-- `? drop ? RT ??????`
-- `???????? drop ??????`
+- drop type 与 break-stage 分布
+- gap 与 missed-period 汇总
+- drop 时间线
+- 与 RT / Data Age / Planning 时间线的对齐结果
+- 如果相关，和 lidar/radar downstream mismatch windows 对齐
+- 说明它们是同步、lead-lag，还是基本独立
 
-Default output:
+## 标准工作流
 
-- Drop type and break-stage distribution
-- Gap and missed-period summaries
-- Drop timeline
-- Alignment with RT/Data Age/Planning timelines
-- Whether drops and latency spikes are synchronized, lead-lag related, or mostly independent
+除非用户明确只想要更窄的分析，否则遵循以下顺序：
 
-## Standard Workflow
-
-Follow this workflow unless the user clearly requests a narrower drill-down:
-
-1. Validate the run directory and raw tables.
-2. Decide whether to load existing derived tables or rebuild the canonical view from raw data.
-3. Apply the data quality gate before making strong claims.
-4. Separate raw view and steady-state view when startup or unstable windows matter.
-5. Choose the interaction mode from the user's request.
-6. Use the minimal set of derived tables needed for that mode.
-7. Always ground conclusions in numeric evidence.
-8. If the task involves drops, align drop timeline and latency timeline instead of analyzing them in isolation.
-9. If the user requests a report, use the report template reference and keep the narrative evidence-first.
+1. 校验 run 目录和原始表
+2. 判断使用现有派生表还是从原始表重建 canonical view
+3. 先过数据质量门，再给强结论
+4. 启动期和 steady-state 分开看
+5. 根据用户问题选择合适的 interaction mode
+6. 只加载当前模式所需的最小派生表集合
+7. 所有结论都要有数字证据
+8. 一律联合看 `p50`、`p95`、`p99` 和 miss rate，不能只看 `p95`
+9. 讨论 miss rate 时必须写明阈值来源，并用 `p99`、代表帧或代表窗口解释 tail
+10. 只要涉及 miss rate 时间线，就至少要检查 miss-rate curve 与对应 `p99` curve 是否同窗对齐；仅看 `p95` 不够
+11. 涉及 drops 时，必须做 drop timeline 和 latency timeline 对齐
+12. 高频输入不稳定时，要比较 service time 和 observed period，并判断 queue growth 是否比 compute growth 更主导
+13. 用户要求报告时，使用 `references/report-template.md`
 
 ## Scripts
 
-Prefer the bundled scripts when the task is to standardize outputs instead of only narrating an analysis:
+在需要标准化输出而不是只做叙述时，优先使用脚本：
 
 - `scripts/validate_run.py <run_dir>`
-  Use first when you need to verify that the run directory and required analysis tables are present and structurally usable.
+  用于先验证 run 目录和分析表是否存在、结构是否可用
 
 - `scripts/build_canonical_tables.py <run_dir>`
-  Use when the user wants canonical outputs for this skill. In `v1`, this script expects the standard analyzer outputs under `analysis/tables` and then produces skill-ready canonical tables, including `quality_table.csv`, `drop_event_table.csv`, `latency_timeline_table.csv`, `latency_drop_alignment_table.csv`, `steady_state_summary.csv`, `deadline_metrics.csv`, and `anomaly_frame_table.csv`.
-  Deadline thresholds are inferred from the run's observed planning period unless overridden with `--deadline-config`, `--planning-total-deadline-ms`, `--planning-to-control-deadline-ms`, or `--e2e-rt-deadline-ms`.
+  用于生成 skill 规范下的 canonical tables。当前 `v1` 会基于 `analysis/tables` 生成 `quality_table.csv`、`drop_event_table.csv`、`latency_timeline_table.csv`、`latency_drop_alignment_table.csv`、`steady_state_summary.csv`、`deadline_metrics.csv`、`anomaly_frame_table.csv` 等。
+  deadline 阈值默认由 run 的 observed planning period 推断，也可通过 override 参数指定。`latency_timeline_table.csv` 默认包含 `p50/p95/p99`、窗口级 miss count、miss rate；`latency_drop_alignment_table.csv` 默认包含 miss rate 与对应 `p99` 的对齐标签。
 
 - `scripts/align_drop_latency.py <canonical_dir>`
-  Use when canonical tables already exist and the task is to recompute time-bin views or drop-latency alignment without rebuilding everything else.
+  当 canonical tables 已存在，只需重算 time-bin 视图或 drop-latency 对齐时使用
 
 - `scripts/plot_canonical_metrics.py <canonical_dir> --metrics ... [--start-s ... --end-s ...]`
-  Use when the user asks for a chart in natural language, especially for a specific time window. This script renders a zero-dependency SVG chart from canonical timeline tables, so plot requests do not depend on `matplotlib` being installed.
+  用于按时间窗渲染基础图表
 
 - `scripts/plot_trace_suite.py <canonical_dir> ...`
-  Use when the user asks for richer chart types. This script supports:
-  - timeline line charts for RT / Data Age / Planning / drop-alignment metrics
-  - dual-axis charts such as `rt_p95` versus `drop_count_total`
-  - module execution charts with p95, jitter, std, and miss rate
-  - sensor→fusion charts by `sensor_kind` or `sensor`
-  - stacked drop-count charts by `break_stage`
+  用于更丰富的图表类型，包括：
+  - RT / Data Age / Planning / drop-alignment timeline
+  - `rt_p95` vs `drop_count_total` 双轴图
+  - `rt_miss_rate_pct` vs `rt_p99`、`data_age_miss_rate_pct` vs `data_age_p99` 必查图
+  - 含 `p50`、`p95`、`p99`、jitter、std、miss rate 的模块图
+  - 按 `sensor_kind` 或 `sensor` 的 sensor-to-fusion 图
+  - 按 `break_stage` 堆叠的 drop-count 图
+  - miss count 与 alignment delta 的窗口对齐图
+  - `standard-suite` 子命令，用于一次性生成报告最小标准图集
 
-When scripts are used, report the output directory and any important assumptions, especially that the current `v1` canonical builder normalizes existing analyzer outputs and enriches them with drop and alignment tables.
+使用脚本后，要说明输出目录和关键假设，尤其是 deadline 阈值来源与 canonical builder 的版本行为。
 
-## Analysis Guardrails
+## 分析守则
 
-Do not skip these rules:
+以下规则不能跳过：
 
-- Never compute module timing from `data_ts_ns`; use `mono_ns` for runtime latency.
-- Never quote RT or Data Age without stating the time anchors.
-- Never present deadline miss rates without stating whether thresholds were inferred from the run period or explicitly overridden.
-- Never merge incomplete-path samples into strict E2E statistics without calling that out.
-- Never describe a frame as a drop without naming the drop type and break stage.
-- Never treat high control reuse alone as `soft_drop`; require evidence that a newer planning output was not consumed or was stale-replaced.
-- Never describe correlation between drops and latency spikes without showing aligned time windows.
-- Never rely on one extreme sample if the window sample count is too small; always report counts.
-- Never collapse all sensors into one row when sensor-origin differences matter.
-- Never give only a plot without a sentence explaining what the plot proves.
+- 模块运行时延只能用 `mono_ns`，不能用 `data_ts_ns`
+- 任何 RT 或 Data Age 都必须说明时间锚点
+- 任何 deadline miss rate 都必须说明阈值是 inferred 还是 override
+- miss rate 不能当成 `p95` 解释
+- 当 `p99`、miss rate、sample count 已经提示风险时，不能只用 `p95` 说系统健康
+- miss rate 相关图如果没有同时检查 `p99` 曲线是否同窗抬升，结论不完整
+- incomplete-path 样本不能混入 strict E2E 统计，除非明确说明
+- 描述一帧是 drop 时，必须说明 drop type 和 break stage
+- 不能仅凭高 control reuse 就判定 `soft_drop`
+- 说 drops 和 latency spikes 有关时，必须给 aligned windows 证据
+- 当窗口样本太少时，不能只拿单个极值样本下结论
+- sensor-origin 差异重要时，不能把所有 sensor 混成一行
+- 高频回归中，不能停在 “sensor_to_fusion 很高”；必须继续问 compute、queue、handoff、parent-origin 谁主导
+- 不能只给图不给解释
 
-## Output Contract
+## 输出契约
 
-When responding with analysis, the skill should prefer a compact but evidence-rich structure:
+分析回答优先采用紧凑但证据充分的结构：
 
-1. State the scope: full run, time window, frame, module, anomaly set, or drop set.
-2. State the data source: raw tables, derived tables, or both.
-3. Report the exact metrics and counts used.
-4. Explain the attribution or the uncertainty.
-5. If helpful, suggest one or two high-value next drill-downs.
+1. 说明 scope：full run、time window、frame、module、anomaly set 或 drop set
+2. 说明数据来源：raw tables、derived tables，或二者都有
+3. 说明所用 metrics、thresholds、counts
+4. 解释 attribution 或 uncertainty
+5. 若相关，明确 `p50`、`p95`、`p99`、miss rate、代表窗口合起来说明了什么
+6. 若有必要，建议一两个高价值下一步下钻方向
 
-If files are generated, provide absolute paths. If a chart cannot be rendered, specify exactly which plot should be inserted and what axes or overlays it should contain.
+若生成了文件，给出绝对路径。若图无法直接渲染，说明应插入什么图、坐标轴是什么、需要什么 overlay。
 
 ## References
 
-Load references selectively:
+按需加载：
 
-- Read `references/sop.md` when you need the full canonical workflow or the formal table system.
-- Read `references/table-contracts.md` when deriving or validating intermediate tables.
-- Read `references/metric-definitions.md` when computing RT, Data Age, deadlines, miss rate, or anomaly thresholds.
-- Read `references/interaction-modes.md` when shaping a response to a specific user request pattern.
-- Read `references/example-prompts.md` when you want concrete examples of how teammates can ask for overviews, drill-downs, or charts in natural language.
-- Read `references/report-template.md` when writing a full analysis report or a presentation-style summary.
+- `references/sop.md`：完整 canonical workflow 和正式表系统
+- `references/table-contracts.md`：中间表结构和校验
+- `references/metric-definitions.md`：RT、Data Age、alignment delta、deadline、miss rate、anomaly threshold 定义
+- `references/interaction-modes.md`：不同用户问题下的回答结构
+- `references/example-prompts.md`：自然语言提问示例
+- `references/report-template.md`：完整分析报告模板
 
-Do not load every reference by default. Keep the context lean and pull in only what the current task needs.
+不要默认把所有 references 一次性全读进来，保持上下文精简。

@@ -37,6 +37,7 @@ FALLBACK_DEADLINES_MS = {
     "planning_total_deadline": 80.0,
     "planning_to_control_deadline": 15.0,
     "e2e_rt_deadline": 150.0,
+    "e2e_data_age_deadline": 240.0,
 }
 
 def read_csv_rows(path: Path) -> List[Dict[str, str]]:
@@ -206,6 +207,7 @@ def infer_deadline_config(
             "planning_total_deadline": base_period_ms,
             "planning_to_control_deadline": max(5.0, base_period_ms * 0.20),
             "e2e_rt_deadline": base_period_ms * 2.0,
+            "e2e_data_age_deadline": base_period_ms * 3.0,
         }
         source = "inferred_from_planning_period"
     else:
@@ -342,16 +344,23 @@ def read_event_rows(run_dir: Path, module: str) -> List[Dict[str, str]]:
 def load_required_tables(run_dir: Path) -> Dict[str, List[Dict[str, str]]]:
     tables_dir = run_dir / "analysis" / "tables"
     required = {
-        "module_phase": tables_dir / "module_phase_table.csv",
-        "handoff": tables_dir / "message_handoff_detail.csv",
-        "trace_link": tables_dir / "trace_link_table.csv",
-        "e2e": tables_dir / "e2e_frame_table.csv",
-        "control_usage": tables_dir / "control_usage.csv",
+        "module_phase": (tables_dir / "module_phase_table.csv",),
+        "handoff": (tables_dir / "message_handoff_detail.csv", tables_dir / "message_handoff_table.csv"),
+        "trace_link": (tables_dir / "trace_link_table.csv",),
+        "e2e": (tables_dir / "e2e_frame_table.csv",),
+        "control_usage": (tables_dir / "control_usage.csv", tables_dir / "control_usage_table.csv"),
     }
-    missing = [str(path) for path in required.values() if not path.exists()]
+    resolved: Dict[str, Path] = {}
+    missing = []
+    for name, candidates in required.items():
+        path = next((candidate for candidate in candidates if candidate.exists()), None)
+        if path is None:
+            missing.append(" or ".join(str(candidate) for candidate in candidates))
+        else:
+            resolved[name] = path
     if missing:
         raise FileNotFoundError("Missing required analysis tables: " + ", ".join(missing))
-    return {name: read_csv_rows(path) for name, path in required.items()}
+    return {name: read_csv_rows(path) for name, path in resolved.items()}
 
 
 def metric_row(name: str, value: Optional[float], threshold: str, inverse: bool = False) -> Dict[str, object]:
@@ -710,6 +719,7 @@ def build_latency_timeline(
     control_rows: Sequence[Dict[str, str]],
     run_start_ns: int,
     bin_seconds: int,
+    deadline_config: Optional[Dict[str, Dict[str, object]]] = None,
 ) -> List[Dict[str, object]]:
     bins: Dict[int, Dict[str, List[float]]] = defaultdict(lambda: defaultdict(list))
     meta_counts: Dict[int, Counter] = defaultdict(Counter)
@@ -756,21 +766,45 @@ def build_latency_timeline(
 
     rows: List[Dict[str, object]] = []
     all_bins = sorted(set(bins.keys()) | set(meta_counts.keys()))
+    rt_threshold = deadline_threshold(deadline_config, "e2e_rt_deadline")
+    age_threshold = deadline_threshold(deadline_config, "e2e_data_age_deadline")
+    planning_threshold = deadline_threshold(deadline_config, "planning_total_deadline")
+    wait_threshold = deadline_threshold(deadline_config, "planning_to_control_deadline")
     for b in all_bins:
+        rt_values = bins[b].get("rt", [])
+        age_values = bins[b].get("data_age", [])
+        planning_values = bins[b].get("planning_total", [])
+        wait_values = bins[b].get("planning_wait", [])
+        reuse_values = bins[b].get("reuse", [])
+        rt_miss = miss_summary(rt_values, rt_threshold)
+        age_miss = miss_summary(age_values, age_threshold)
+        planning_miss = miss_summary(planning_values, planning_threshold)
+        wait_miss = miss_summary(wait_values, wait_threshold)
         rows.append({
             "time_bin_s": b,
             "sample_count": meta_counts[b].get("sample_count", 0),
             "complete_count": meta_counts[b].get("complete_count", 0),
-            "rt_p50": percentile(bins[b].get("rt", []), 50),
-            "rt_p95": percentile(bins[b].get("rt", []), 95),
-            "rt_p99": percentile(bins[b].get("rt", []), 99),
-            "data_age_p50": percentile(bins[b].get("data_age", []), 50),
-            "data_age_p95": percentile(bins[b].get("data_age", []), 95),
-            "data_age_p99": percentile(bins[b].get("data_age", []), 99),
-            "planning_total_p50": percentile(bins[b].get("planning_total", []), 50),
-            "planning_total_p95": percentile(bins[b].get("planning_total", []), 95),
-            "planning_wait_p95": percentile(bins[b].get("planning_wait", []), 95),
-            "reuse_p95": percentile(bins[b].get("reuse", []), 95),
+            "rt_p50": percentile(rt_values, 50),
+            "rt_p95": percentile(rt_values, 95),
+            "rt_p99": percentile(rt_values, 99),
+            "rt_miss_count": rt_miss["miss_count"],
+            "rt_miss_rate_pct": rt_miss["miss_rate_pct"],
+            "data_age_p50": percentile(age_values, 50),
+            "data_age_p95": percentile(age_values, 95),
+            "data_age_p99": percentile(age_values, 99),
+            "data_age_miss_count": age_miss["miss_count"],
+            "data_age_miss_rate_pct": age_miss["miss_rate_pct"],
+            "planning_total_p50": percentile(planning_values, 50),
+            "planning_total_p95": percentile(planning_values, 95),
+            "planning_total_p99": percentile(planning_values, 99),
+            "planning_total_miss_count": planning_miss["miss_count"],
+            "planning_total_miss_rate_pct": planning_miss["miss_rate_pct"],
+            "planning_wait_p95": percentile(wait_values, 95),
+            "planning_wait_p99": percentile(wait_values, 99),
+            "planning_wait_miss_count": wait_miss["miss_count"],
+            "planning_wait_miss_rate_pct": wait_miss["miss_rate_pct"],
+            "reuse_p95": percentile(reuse_values, 95),
+            "reuse_p99": percentile(reuse_values, 99),
         })
     return rows
 
@@ -782,13 +816,23 @@ def is_high_latency(
     plan_t: Optional[float],
     wait_t: Optional[float],
     reuse_t: Optional[float],
+    rt_p99_t: Optional[float] = None,
+    age_p99_t: Optional[float] = None,
+    plan_p99_t: Optional[float] = None,
+    wait_p99_t: Optional[float] = None,
+    reuse_p99_t: Optional[float] = None,
 ) -> bool:
     pairs = [
         (to_float(row.get("rt_p95")), rt_t),
+        (to_float(row.get("rt_p99")), rt_p99_t),
         (to_float(row.get("data_age_p95")), age_t),
+        (to_float(row.get("data_age_p99")), age_p99_t),
         (to_float(row.get("planning_total_p95")), plan_t),
+        (to_float(row.get("planning_total_p99")), plan_p99_t),
         (to_float(row.get("planning_wait_p95")), wait_t),
+        (to_float(row.get("planning_wait_p99")), wait_p99_t),
         (to_float(row.get("reuse_p95")), reuse_t),
+        (to_float(row.get("reuse_p99")), reuse_p99_t),
     ]
     for value, threshold in pairs:
         if value is not None and threshold is not None and value >= threshold:
@@ -818,15 +862,44 @@ def build_latency_drop_alignment(
     global_plan_threshold = percentile([to_float(r.get("planning_total_p95")) for r in latency_rows if to_float(r.get("planning_total_p95")) is not None], 95)
     global_wait_threshold = percentile([to_float(r.get("planning_wait_p95")) for r in latency_rows if to_float(r.get("planning_wait_p95")) is not None], 95)
     global_reuse_threshold = percentile([to_float(r.get("reuse_p95")) for r in latency_rows if to_float(r.get("reuse_p95")) is not None], 95)
+    global_rt_p99_threshold = percentile([to_float(r.get("rt_p99")) for r in latency_rows if to_float(r.get("rt_p99")) is not None], 95)
+    global_age_p99_threshold = percentile([to_float(r.get("data_age_p99")) for r in latency_rows if to_float(r.get("data_age_p99")) is not None], 95)
+    global_plan_p99_threshold = percentile([to_float(r.get("planning_total_p99")) for r in latency_rows if to_float(r.get("planning_total_p99")) is not None], 95)
+    global_wait_p99_threshold = percentile([to_float(r.get("planning_wait_p99")) for r in latency_rows if to_float(r.get("planning_wait_p99")) is not None], 95)
+    global_reuse_p99_threshold = percentile([to_float(r.get("reuse_p99")) for r in latency_rows if to_float(r.get("reuse_p99")) is not None], 95)
 
     all_bins = sorted(set(latency_by_bin.keys()) | set(drop_counts.keys()))
     rows: List[Dict[str, object]] = []
     for idx, b in enumerate(all_bins):
         lat = latency_by_bin.get(b, {})
         drops = drop_counts.get(b, Counter())
-        high_now = is_high_latency(lat, global_rt_threshold, global_age_threshold, global_plan_threshold, global_wait_threshold, global_reuse_threshold)
+        high_now = is_high_latency(
+            lat,
+            global_rt_threshold,
+            global_age_threshold,
+            global_plan_threshold,
+            global_wait_threshold,
+            global_reuse_threshold,
+            global_rt_p99_threshold,
+            global_age_p99_threshold,
+            global_plan_p99_threshold,
+            global_wait_p99_threshold,
+            global_reuse_p99_threshold,
+        )
         next_lat = latency_by_bin.get(all_bins[idx + 1], {}) if idx + 1 < len(all_bins) else {}
-        next_high = is_high_latency(next_lat, global_rt_threshold, global_age_threshold, global_plan_threshold, global_wait_threshold, global_reuse_threshold)
+        next_high = is_high_latency(
+            next_lat,
+            global_rt_threshold,
+            global_age_threshold,
+            global_plan_threshold,
+            global_wait_threshold,
+            global_reuse_threshold,
+            global_rt_p99_threshold,
+            global_age_p99_threshold,
+            global_plan_p99_threshold,
+            global_wait_p99_threshold,
+            global_reuse_p99_threshold,
+        )
         next_drop = drop_counts.get(all_bins[idx + 1], Counter()) if idx + 1 < len(all_bins) else Counter()
 
         if drops.get("total", 0) > 0 and high_now:
@@ -843,15 +916,40 @@ def build_latency_drop_alignment(
             lead_lag_tag = "none"
 
         stage_counts = {k: v for k, v in drops.items() if k != "total"}
+        rt_miss_rate = to_float(lat.get("rt_miss_rate_pct"))
+        age_miss_rate = to_float(lat.get("data_age_miss_rate_pct"))
+        rt_p99 = to_float(lat.get("rt_p99"))
+        age_p99 = to_float(lat.get("data_age_p99"))
+        rt_miss_p99_alignment = (
+            "miss_and_p99_high" if rt_miss_rate and rt_miss_rate > 0 and rt_p99 is not None and global_rt_p99_threshold is not None and rt_p99 >= global_rt_p99_threshold
+            else "miss_without_p99_high" if rt_miss_rate and rt_miss_rate > 0
+            else "no_miss"
+        )
+        data_age_miss_p99_alignment = (
+            "miss_and_p99_high" if age_miss_rate and age_miss_rate > 0 and age_p99 is not None and global_age_p99_threshold is not None and age_p99 >= global_age_p99_threshold
+            else "miss_without_p99_high" if age_miss_rate and age_miss_rate > 0
+            else "no_miss"
+        )
         rows.append({
             "time_bin_s": b,
             "drop_count_total": drops.get("total", 0),
             "drop_count_by_stage": stage_counts,
             "rt_p95": lat.get("rt_p95", ""),
+            "rt_p99": lat.get("rt_p99", ""),
+            "rt_miss_rate_pct": lat.get("rt_miss_rate_pct", ""),
             "data_age_p95": lat.get("data_age_p95", ""),
+            "data_age_p99": lat.get("data_age_p99", ""),
+            "data_age_miss_rate_pct": lat.get("data_age_miss_rate_pct", ""),
             "planning_total_p95": lat.get("planning_total_p95", ""),
+            "planning_total_p99": lat.get("planning_total_p99", ""),
+            "planning_total_miss_rate_pct": lat.get("planning_total_miss_rate_pct", ""),
             "planning_wait_p95": lat.get("planning_wait_p95", ""),
+            "planning_wait_p99": lat.get("planning_wait_p99", ""),
+            "planning_wait_miss_rate_pct": lat.get("planning_wait_miss_rate_pct", ""),
             "reuse_p95": lat.get("reuse_p95", ""),
+            "reuse_p99": lat.get("reuse_p99", ""),
+            "rt_miss_p99_alignment": rt_miss_p99_alignment,
+            "data_age_miss_p99_alignment": data_age_miss_p99_alignment,
             "corr_tag": corr_tag,
             "lead_lag_tag": lead_lag_tag,
         })
@@ -870,6 +968,23 @@ def summarize_values(values: Sequence[float]) -> Dict[str, Optional[float]]:
         "p99": percentile(values, 99),
         "max": max_value(values),
     }
+
+
+def miss_summary(values: Sequence[float], threshold_ms: Optional[float]) -> Dict[str, object]:
+    clean = [v for v in values if v is not None]
+    if threshold_ms is None:
+        return {"miss_count": "", "miss_rate_pct": ""}
+    miss_count = sum(1 for v in clean if v > threshold_ms)
+    return {
+        "miss_count": miss_count,
+        "miss_rate_pct": (100.0 * miss_count / len(clean)) if clean else "",
+    }
+
+
+def deadline_threshold(deadline_config: Optional[Dict[str, Dict[str, object]]], metric_name: str) -> Optional[float]:
+    if not deadline_config or metric_name not in deadline_config:
+        return None
+    return to_float(deadline_config[metric_name].get("threshold_ms"))
 
 
 def build_steady_state_summary(
@@ -1002,6 +1117,12 @@ def build_deadline_metrics(
             if to_int(row.get("complete_path"), 0) == 1
             and is_at_or_after_s(choose_anchor_ns(row, ("sensor_origin_ns", "fusion_input_ns", "fusion_output_ns")), run_start_ns, start_s)
         ]
+        data_age_values = [
+            to_float(row.get("data_lifetime_ms")) or to_float(row.get("data_age_ms"))
+            for row in e2e_rows
+            if to_int(row.get("complete_path"), 0) == 1
+            and is_at_or_after_s(choose_anchor_ns(row, ("sensor_origin_ns", "fusion_input_ns", "fusion_output_ns")), run_start_ns, start_s)
+        ]
         rows.extend([
             deadline_row(
                 scope,
@@ -1029,6 +1150,15 @@ def build_deadline_metrics(
                 "first_control_consume",
                 deadline_config["e2e_rt_deadline"],
                 e2e_values,
+            ),
+            deadline_row(
+                scope,
+                "e2e_data_age_deadline",
+                "e2e.data_age",
+                "sensor_origin",
+                "last_control_output",
+                deadline_config["e2e_data_age_deadline"],
+                data_age_values,
             ),
         ])
     return rows

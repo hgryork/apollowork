@@ -45,23 +45,45 @@ FIELDNAMES_TIMELINE = [
     "rt_p50",
     "rt_p95",
     "rt_p99",
+    "rt_miss_count",
+    "rt_miss_rate_pct",
     "data_age_p50",
     "data_age_p95",
     "data_age_p99",
+    "data_age_miss_count",
+    "data_age_miss_rate_pct",
     "planning_total_p50",
     "planning_total_p95",
+    "planning_total_p99",
+    "planning_total_miss_count",
+    "planning_total_miss_rate_pct",
     "planning_wait_p95",
+    "planning_wait_p99",
+    "planning_wait_miss_count",
+    "planning_wait_miss_rate_pct",
     "reuse_p95",
+    "reuse_p99",
 ]
 FIELDNAMES_ALIGNMENT = [
     "time_bin_s",
     "drop_count_total",
     "drop_count_by_stage",
     "rt_p95",
+    "rt_p99",
+    "rt_miss_rate_pct",
     "data_age_p95",
+    "data_age_p99",
+    "data_age_miss_rate_pct",
     "planning_total_p95",
+    "planning_total_p99",
+    "planning_total_miss_rate_pct",
     "planning_wait_p95",
+    "planning_wait_p99",
+    "planning_wait_miss_rate_pct",
     "reuse_p95",
+    "reuse_p99",
+    "rt_miss_p99_alignment",
+    "data_age_miss_p99_alignment",
     "corr_tag",
     "lead_lag_tag",
 ]
@@ -147,6 +169,7 @@ def load_deadline_overrides(args):
             "planning_total_deadline_ms": "planning_total_deadline",
             "planning_to_control_deadline_ms": "planning_to_control_deadline",
             "e2e_rt_deadline_ms": "e2e_rt_deadline",
+            "e2e_data_age_deadline_ms": "e2e_data_age_deadline",
         }
         for key, value in data.items():
             metric_name = aliases.get(key, key)
@@ -155,11 +178,20 @@ def load_deadline_overrides(args):
         "planning_total_deadline": args.planning_total_deadline_ms,
         "planning_to_control_deadline": args.planning_to_control_deadline_ms,
         "e2e_rt_deadline": args.e2e_rt_deadline_ms,
+        "e2e_data_age_deadline": args.e2e_data_age_deadline_ms,
     }
     for key, value in direct.items():
         if value is not None:
             overrides[key] = float(value)
     return overrides
+
+
+def copy_first_existing(candidates, dst: Path) -> None:
+    for src in candidates:
+        if src.exists():
+            copy_csv(src, dst)
+            return
+    raise FileNotFoundError("Missing required analysis table: " + " or ".join(str(src) for src in candidates))
 
 
 def main() -> int:
@@ -175,6 +207,7 @@ def main() -> int:
     parser.add_argument("--planning-total-deadline-ms", type=float, help="Override planning total deadline in milliseconds")
     parser.add_argument("--planning-to-control-deadline-ms", type=float, help="Override planning to control deadline in milliseconds")
     parser.add_argument("--e2e-rt-deadline-ms", type=float, help="Override E2E reaction-time deadline in milliseconds")
+    parser.add_argument("--e2e-data-age-deadline-ms", type=float, help="Override E2E data-age deadline in milliseconds")
     args = parser.parse_args()
 
     run_dir = Path(args.run_dir).resolve()
@@ -189,14 +222,20 @@ def main() -> int:
     control_rows = tables["control_usage"]
 
     mapping = {
-        run_dir / "analysis" / "tables" / "module_phase_table.csv": out_dir / "module_phase_table.csv",
-        run_dir / "analysis" / "tables" / "message_handoff_detail.csv": out_dir / "message_handoff_table.csv",
-        run_dir / "analysis" / "tables" / "trace_link_table.csv": out_dir / "trace_link_table.csv",
-        run_dir / "analysis" / "tables" / "e2e_frame_table.csv": out_dir / "e2e_frame_table.csv",
-        run_dir / "analysis" / "tables" / "control_usage.csv": out_dir / "control_usage_table.csv",
+        (run_dir / "analysis" / "tables" / "module_phase_table.csv",): out_dir / "module_phase_table.csv",
+        (
+            run_dir / "analysis" / "tables" / "message_handoff_detail.csv",
+            run_dir / "analysis" / "tables" / "message_handoff_table.csv",
+        ): out_dir / "message_handoff_table.csv",
+        (run_dir / "analysis" / "tables" / "trace_link_table.csv",): out_dir / "trace_link_table.csv",
+        (run_dir / "analysis" / "tables" / "e2e_frame_table.csv",): out_dir / "e2e_frame_table.csv",
+        (
+            run_dir / "analysis" / "tables" / "control_usage.csv",
+            run_dir / "analysis" / "tables" / "control_usage_table.csv",
+        ): out_dir / "control_usage_table.csv",
     }
-    for src, dst in mapping.items():
-        copy_csv(src, dst)
+    for candidates, dst in mapping.items():
+        copy_first_existing(candidates, dst)
 
     quality_rows = build_quality_rows(run_dir, module_rows, handoff_rows, trace_rows, e2e_rows)
     write_csv_rows(out_dir / "quality_table.csv", quality_rows, FIELDNAMES_QUALITY)
@@ -218,7 +257,7 @@ def main() -> int:
     )
     write_csv_rows(out_dir / "drop_event_table.csv", drop_rows, FIELDNAMES_DROP)
 
-    timeline_rows = build_latency_timeline(module_rows, handoff_rows, e2e_rows, control_rows, run_start_ns, args.bin_seconds)
+    timeline_rows = build_latency_timeline(module_rows, handoff_rows, e2e_rows, control_rows, run_start_ns, args.bin_seconds, deadline_config)
     write_csv_rows(out_dir / "latency_timeline_table.csv", timeline_rows, FIELDNAMES_TIMELINE)
 
     alignment_rows = build_latency_drop_alignment(timeline_rows, drop_rows, run_start_ns, args.bin_seconds)
